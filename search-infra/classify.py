@@ -28,6 +28,19 @@ def classify(stmt: str):
         return "B", reasons + [f"conclusion=exact size (RepSizeAtMost {exact.group(2)} and not "
                                f"{exact.group(4)}): lower half is pipeline-provable, upper half "
                                "needs an explicit circuit"]
+    # promise-mask lower bound: the rep_lower_mask shape
+    #   ¬ RepSizeAtMost (fun (u : Fin n) (v : Fin m) => M.testBit (m * u + v)) s
+    mask = re.search(r"¬\s*\(?\s*(?:\S+\.)?RepSizeAtMost\s*\(fun\s+(.*?)\s*=>\s*"
+                     r"(\d+)\.testBit\s*\(\s*(\d+)\s*\*\s*\w+\s*\+\s*\w+\s*\)\)\s*(\d+)\s*\)?\s*$", s)
+    if mask:
+        fins = re.findall(r"Fin\s+(\d+)", mask.group(1))
+        if len(fins) >= 2:
+            n_, m_, M_, s_ = int(fins[0]), int(fins[1]), int(mask.group(2)), int(mask.group(4))
+            return "B", reasons + [f"subtype=promise-mask n={n_} m={m_} M={M_} s={s_} "
+                                   "(mkpromiserow-ready: genpromise + rep_lower_mask)"]
+    if re.search(r"¬\s*\(?\s*(?:\S+\.)?RepSizeAtMost\b", s):
+        return "B", reasons + ["subtype=promise-other (RepSizeAtMost lower bound, "
+                               "function not a testBit mask lambda)"]
     lower = re.search(r"(\d+)\s*≤\s*\S+\.size\b", s)
     upper = re.search(r"\.size\s*≤\s*(\d+)", s)
     if "FormulaSat" in s and "enc" in s:

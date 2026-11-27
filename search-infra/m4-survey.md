@@ -38,3 +38,13 @@ Checker / Cube / Link / Link2 / LinkN / LinkN2 / Promise / PromiseCube / Promise
   CNF 生成器 `genpromise.py` の作成が中心。genmono は enc 専用、genrow は --enc2 対応済み。
 - 未確認: Promise 側が使う enc2 が Link2（単調・対称性除去）か LinkN（NOT）か、
   NOT 版の promise 定理が存在するか。gennot.py の対応先と合わせて次回確認する。
+
+## B-readcount: L_meta_1388 の証明構造（2026-11-27 読解）
+
+- 130 KB、import は Mathlib + PEqualNP.Defs のみ。LRAT/SAT 符号化は一切使っていない
+- 中身は手書きの組合せ論法: LMeta616（ゲート除去・単純化エンジン: step/statVal/simpMono/elimPass）、
+  cubicBound（3正則グラフの頂点被覆に関する一般の下界定理）、WireComponents.coloring、
+  FanoPartition.partition_bound、Diagonal.split、FanoProduct.impossible/endpoint
+  （7+7 の Fano 平面の数え上げ）を組み立てて最終定理（lineDegrees ≤ 2 の ¬∃ 主張）に接続
+- 結論: この族は符号化の問題ではない。自動化するなら除去論法そのもののインスタンス別形式化が
+  要り、パイプライン化の対象ではなく研究レベルの作業。優先度を下げ、実例が増えるまで保留が妥当

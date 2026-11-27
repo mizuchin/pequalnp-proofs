@@ -60,3 +60,18 @@
 - 2026-11-26 21:31 マイルストーン4調査完了（`search-infra/m4-survey.md`）: B は3亜種に分かれる。B-promise（RepSizeAtMost / マスク型）はライブラリがほぼ揃っており、残りは `enc2` の CNF 生成器 `genpromise.py` のみ。B-readcount はライブラリ無し（L_meta_1388 の証明構造の読解から）。B-firstgate は実例未発見。攻撃順序は promise → readcount → firstgate。
 - 2026-11-27 01:20 `genpromise.py` 検証通過: Promise.lean は Link2 の enc2（単調 enc + fLex、NOT ゲート無し）を使うことを確認。`genpromise.py`（n=2,m=2,M=11,s=2）の出力 CNF は、Lean 本体の `enc2 4 2 (gMask 2 2 11) (repRows 2 2)` の #eval 出力を DIMACS へ変換したものと、341節すべて順序込みで完全一致。検証用スクラッチファイルは除去しツリーは clean。残りは CaDiCaL → `genrow.py --enc2` → `rep_lower_mask` による最終定理までの配線。
 - 2026-11-27 09:04 Claude Code のレビュー対応: 書式ガード（outside-guard.mjs はコメント含む生テキスト走査）で取り込みファイルが拒否される問題を修正。importer v2: ライブラリ部分のコメント全除去、`macro "wdt"` を削除し使用13件を展開形に置換、import は `PEqualNP.Defs` のみ、Shannon の wire-fold 補題6件（wiresFrom_prefix 含む）を aux 名前空間へコピー、open から Helpers を除去。pipeline にガード3コマンド（gap-of-file/imports/closure）を整形後・ビルド前へ追加。L_meta_2229 再生成で GUARD OK + lake build exit 0（137,262 bytes）。指摘の訂正: `rep_lower_mask` は PromiseGen.lean 79行目。新分類候補: 「link 特化型」（L_meta_3644 = Link.lean の `link` を n=10, s=14 に特化）。
+
+### 2026-11-27 09:1x JST — B-promise 通し完了・分類器拡張・readcount 読解
+
+- B-promise end-to-end 動作確認: mkpromiserow (2 2 11 0) の生成ファイルが lake build exit 0。
+  genpromiserow.py に3件の修正: (1) unsat の FormulaSat を PEqualNP.Defs.LratEncoding.FormulaSat に
+  完全修飾（Checker 側と同名で ambiguous だった）、seg0 の ClauseSat も Checker 側に修飾。
+  (2) lower の `{M}.testBit` は数値リテラルとして構文エラーになるため `Nat.testBit {M}` に。
+  (3) RepSizeAtMost は開いた名前空間に無いため PEqualNP.Represents.RepSizeAtMost に修飾。
+  生成器はこれまでビルド未検証だったことが判明（今回が初の通し）。
+- classify.py に promise-mask 抽出を追加: ¬ RepSizeAtMost (fun (u : Fin n) (v : Fin m) =>
+  M.testBit (m * u + v)) s の形から (n, m, M, s) を抜いて B / mkpromiserow-ready と判定。
+  testBit でない RepSizeAtMost 下界は B / promise-other。検証: 規範形2件・L_meta_5531（exact のまま）・
+  L_meta_10055（promise-other）・L_meta_2229（A のまま）。
+- B-readcount: L_meta_1388 は LRAT を使わない手書き組合せ論法（m4-survey.md に記録）。
+  パイプライン化の対象外と判断し保留。

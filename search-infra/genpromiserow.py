@@ -185,7 +185,7 @@ with open(out, 'w', encoding='utf-8', newline='\n') as o:  # UTF-8 and LF on eve
     o.write(f'noncomputable def {name}_K : List Nat := unpack {W} {name}_Kw\n\n')
     if len(segs) == 1:
         wordsdef(o, f'{name}_P', pack(alltoks))
-        o.write(f'theorem unsat : ¬ FormulaSat F :=\n'
+        o.write(f'theorem unsat : ¬ PEqualNP.Defs.LratEncoding.FormulaSat F :=\n'
                 f'  checkW_sound F {name}_K {W} {name}_P (by decide +kernel)\n\n')
     else:
         for b, bt in enumerate(btoks):
@@ -196,7 +196,7 @@ with open(out, 'w', encoding='utf-8', newline='\n') as o:  # UTF-8 and LF on eve
         for k, sg in enumerate(segs):
             wordsdef(o, f'{name}_S{k}', pack([t for s in sg for t in steptoks(s)]))
             if k == 0:
-                o.write(f'theorem seg0 : ∀ a, (∀ c ∈ F, ClauseSat a c) → EntriesSat a {name}_B1 :=\n'
+                o.write(f'theorem seg0 : ∀ a, (∀ c ∈ F, PEqualNP.Library.LRAT.ClauseSat a c) → EntriesSat a {name}_B1 :=\n'
                         f'  checkFirst_sound F {name}_K {W} {name}_S0 {name}_B1 (by decide +kernel)\n\n')
             elif k < nseg - 1:
                 o.write(f'theorem seg{k} : ∀ a, EntriesSat a {name}_B{k} → EntriesSat a {name}_B{k + 1} :=\n'
@@ -207,9 +207,9 @@ with open(out, 'w', encoding='utf-8', newline='\n') as o:  # UTF-8 and LF on eve
         expr = 'seg0 a ha'
         for k in range(1, nseg):
             expr = f'seg{k} a ({expr})'
-        o.write(f'theorem unsat : ¬ FormulaSat F := fun ⟨a, ha⟩ =>\n  {expr}\n\n')
+        o.write(f'theorem unsat : ¬ PEqualNP.Defs.LratEncoding.FormulaSat F := fun ⟨a, ha⟩ =>\n  {expr}\n\n')
     o.write(f'/-- The {n}x{m} mask {M} needs more than {S} gates to represent. -/\n'
-            f'theorem lower : ¬ RepSizeAtMost (fun (u : Fin {n}) (v : Fin {mm}) => {M}.testBit ({mm} * u + v)) {S} :=\n'
+            f'theorem lower : ¬ PEqualNP.Represents.RepSizeAtMost (fun (u : Fin {n}) (v : Fin {mm}) => Nat.testBit {M} ({mm} * u + v)) {S} :=\n'
             f'  rep_lower_mask {n} {mm} {M} {S} unsat\n\n')
     o.write(f'end {ns}\n')
 
