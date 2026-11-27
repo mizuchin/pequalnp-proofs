@@ -45,6 +45,33 @@ def classify(stmt: str):
     if re.search(r"¬\s*\(?\s*(?:\S+\.)?RepSizeAtMost\b", s):
         return "B", reasons + ["subtype=promise-other (RepSizeAtMost lower bound, "
                                "function not a testBit mask lambda)"]
+    # find-a-circuit (upper / existence side): a positive RepSizeAtMost,
+    # or an explicit exists-circuit statement with a size bound
+    fmask = re.search(r"(?:\S+\.)?RepSizeAtMost\s*\(fun\s+(.*?)\s*=>\s*"
+                      r"(?:\(\s*(\d+)\s*:\s*ℕ\s*\)|(\d+))\.testBit\s*"
+                      r"\(\s*(\d+)\s*\*\s*\w+(?:\.val)?\s*\+\s*\w+(?:\.val)?\s*\)\)\s*(\d+)\s*\)?\s*$", s)
+    fmask_nat = re.search(r"(?:\S+\.)?RepSizeAtMost\s*\(fun\s+(.*?)\s*=>\s*"
+                          r"Nat\.testBit\s+(\d+)\s*"
+                          r"\(\s*(\d+)\s*\*\s*\w+(?:\.val)?\s*\+\s*\w+(?:\.val)?\s*\)\)\s*(\d+)\s*\)?\s*$", s)
+    if (fmask or fmask_nat) and "¬" not in s:
+        fm = fmask or fmask_nat
+        fins = re.findall(r"Fin\s+(\d+)", fm.group(1))
+        if len(fins) == 1 and len(fm.group(1).split(":")[0].split()) >= 2:
+            fins = [fins[0], fins[0]]  # shared binder: fun u v : Fin N
+        M_ = (fm.group(2) or fm.group(3)) if fmask else fm.group(2)
+        k_ = fm.group(5) if fmask else fm.group(4)
+        if len(fins) >= 2 and M_:
+            return "U", reasons + [f"subtype=find-mask n={fins[0]} m={fins[1]} M={M_} k={k_} "
+                                   "(gensynth-ready: synthesize, then existence proof)"]
+    fcirc = re.search(r"∃\s*\(?\s*\w+\s*:\s*(?:\S+\.)?Circuit", s)
+    if fcirc:
+        ub = re.search(r"\.size\s*≤\s*(\d+)", s)
+        return "U", reasons + [f"subtype=find-circuit k={ub.group(1) if ub else '?'} "
+                               "(synthesize a circuit, prove by evaluation)"]
+    if "RepSizeAtMost" in s and "¬" not in s:
+        ub = re.search(r"RepSizeAtMost\s+.+?\s+(\d+)\s*\)?\s*$", s)
+        return "U", reasons + [f"subtype=find-other k={ub.group(1) if ub else '?'} "
+                               "(positive RepSizeAtMost existence)"]
     lower = re.search(r"(\d+)\s*≤\s*\S+\.size\b", s)
     upper = re.search(r"\.size\s*≤\s*(\d+)", s)
     # link-specialized: a universal statement whose conclusion is
