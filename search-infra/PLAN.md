@@ -75,3 +75,16 @@
   L_meta_10055（promise-other）・L_meta_2229（A のまま）。
 - B-readcount: L_meta_1388 は LRAT を使わない手書き組合せ論法（m4-survey.md に記録）。
   パイプライン化の対象外と判断し保留。
+
+### 2026-11-27 09:2x JST — マイルストーン5（方向4）完了
+
+- 小ケース通し: 2×2 マスク M=11 の exact-size（=1）を、下半分 mkpromiserow+rep_lower_mask、
+  上半分 明示回路1ゲート、下半分と desk 形式（(11 : ℕ).testBit / u.val）の conjunction まで
+  1ファイルで lake build exit 0。
+- 回路合成器 gensynth.py を追加: unit 行上のマスクに対する DAG 共有つきレベル探索。
+  M=11 → 1ゲート [or(0,3)]、既知の正解ケース 4×4 M=359 → 6ゲート（0.08秒、L_meta_5531 の
+  サイズと一致）。合成回路での up 定理（RepSizeAtMost 359 6）も単体でビルド通過。
+- これで仕様のマイルストーン 1〜5 は一通り完了。残件: B-firstgate（desk の実例待ち）、
+  exact-size の pipeline 統合（分類器は exact を検出済み。mkexact 相当の整形は未実装）、
+  提出可能形への importer 適用（promise/exact 系は library import 前提の生成で、
+  取り込み器の対象は現状 A 型のみ）。
