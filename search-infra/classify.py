@@ -47,6 +47,15 @@ def classify(stmt: str):
                                "function not a testBit mask lambda)"]
     lower = re.search(r"(\d+)\s*≤\s*\S+\.size\b", s)
     upper = re.search(r"\.size\s*≤\s*(\d+)", s)
+    # link-specialized: a universal statement whose conclusion is
+    # FormulaSat (enc N S g rows) under Monotone2 / size hypotheses
+    # (the L_meta_3644 shape; no SAT needed, Link's proof specialized)
+    if "FormulaSat" in s and "Monotone2" in s:
+        encm = (re.search(r"\benc\s*\(\s*(\d+)\s*:\s*ℕ\s*\)\s*\(\s*(\d+)\s*:\s*ℕ\s*\)", s)
+                or re.search(r"\benc\s+(\d+)\s+(\d+)\b", s))
+        if encm:
+            return "L", reasons + [f"subtype=link-specialized n={encm.group(1)} s={encm.group(2)} "
+                                   "(Link.valid_ofCirc/exists_nf/enc_sat specialized; no SAT)"]
     if "FormulaSat" in s and "enc" in s:
         return "C", reasons + ["conclusion=FormulaSat(enc ...) (SAT-side)"]
     if lower:

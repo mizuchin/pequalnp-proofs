@@ -56,15 +56,31 @@ main を fast-forward のみで追随し、build する（ローカル main に�
   公式は Lean の enc2 自体で、CNF は証明書ヒントの読み取り専用）、`search-infra/mkpromiserow.py`
   （(n, m, M, s) → genpromise → CaDiCaL → genpromiserow のワンコマンド）
 
+## 公式チェッカーの裏付け（2026-11-27）
+
+- Claude Code が `examples/L_meta_2229.lean`（取り込み器 v2 の再生成版）を公式チェッカーに通し
+  **ACCEPTED**（138秒、公理は標準3つのみ）。宣言文はマージ済み版と完全一致、ガード3段階通過、
+  import は `PEqualNP.Defs` のみ。A 型は「宣言文を渡すだけで提出できるファイルが出る」ことが
+  公式に裏付けられた。ローカルで完走しないのは VM 性能の問題。提出前の最終確認は、生成ファイルを
+  ブランチに置けば Claude Code 側で代行可能。
+
+## 完了した追加分（2026-11-27）
+
+- B-promise 通し: mkpromiserow 生成ファイルが `rep_lower_mask` 経由で lake build 成功
+  （生成器の3件の不具合を修正: FormulaSat の完全修飾、`Nat.testBit` 形式、RepSizeAtMost の修飾）
+- 分類器に promise-mask 抽出（(n, m, M, s) を抜いて mkpromiserow-ready と判定）を追加
+- M5（方向4）: 2×2 マスク M=11 の exact-size を通しで確認。回路合成器 `gensynth.py` を追加し、
+  既知ケース 4×4 マスク359 で6ゲート（正解サイズ一致）を合成、up 定理のビルドも通過
+- B-readcount: L_meta_1388 は LRAT を使わない手書き組合せ論法と判明。パイプライン化対象外
+
 ## 未完了・次の手
 
-1. promise の通しテスト: mkpromiserow の出力に `rep_lower_mask` の最終定理を付けて lake build まで（未実施）
-2. 分類器に RepSizeAtMost / マスク型の (n, m, M, s) 抽出を追加し、pipeline の B-promise 分岐を生やす
-3. B-readcount: L_meta_1388 のマージ済み証明の構造を読むところから
-4. M5（方向4）: L_meta_5531 型（下限は LRAT、上限は回路の明示）の一般化で1件通す案
-5. 分類への追加候補「link 特化型」（Claude Code の提案）: L_meta_3644 は Link.lean の定理 `link` を
-   n=10, s=14 に特化しただけの主張で、SAT は要らず証明の取り込みで機械的に作れる。帰着の仮定として
-   受付に出てくる種類。ガード対応済みの取り込み器が前提になる（対応済み）
+1. link 特化型（L_meta_3644 型、SAT 不要）の自動化 — 実施中
+2. 規模の壁: `enc2` の対称性除去で証明書がどれだけ縮むか実測。cube 分割を帰着ファイルで
+   別ステップにする案の検討
+3. promise / exact 系の提出形（取り込み器で PromiseGen 系も内包する拡張）。実ステップを
+   受けた時に合わせて作るのが無駄がない
+4. B-firstgate: desk に実例が出るまで保留
 
 ## 作業記録
 

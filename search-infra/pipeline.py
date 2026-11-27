@@ -29,16 +29,22 @@ if "--imports" in sys.argv:
 stmt = " ".join(open(stmt_path).read().split())
 cls, reasons = classify(stmt)
 print(f"classify: {cls} | {'; '.join(reasons)}", flush=True)
-if cls != "A":
-    sys.exit(f"pipeline handles A only (got {cls})")
-
-n = int(re.search(r"Fin (\d+) → Bool", stmt).group(1))
-bound = int(re.search(r"(\d+)\s*≤\s*\S+\.size\b", stmt).group(1))
-s = bound - 1
-edges = [(a, b) for a, b in re.findall(r"z (\d+) && z (\d+)", stmt)]
-edges_str = ",".join(f"{a}{b}" for a, b in edges)
-readsback = any("ReadsBack" in r for r in reasons)
-print(f"parsed: n={n} s={s} edges={edges_str} readsback={readsback}", flush=True)
+if cls not in ("A", "L"):
+    sys.exit(f"pipeline handles A and L only (got {cls})")
+link_mode = cls == "L"
+if link_mode:
+    encm = (re.search(r"\benc\s*\(\s*(\d+)\s*:\s*ℕ\s*\)\s*\(\s*(\d+)\s*:\s*ℕ\s*\)", stmt)
+            or re.search(r"\benc\s+(\d+)\s+(\d+)\b", stmt))
+    n, s = int(encm.group(1)), int(encm.group(2))
+    print(f"parsed (link): n={n} s={s}", flush=True)
+else:
+    n = int(re.search(r"Fin (\d+) → Bool", stmt).group(1))
+    bound = int(re.search(r"(\d+)\s*≤\s*\S+\.size\b", stmt).group(1))
+    s = bound - 1
+    edges = [(a, b) for a, b in re.findall(r"z (\d+) && z (\d+)", stmt)]
+    edges_str = ",".join(f"{a}{b}" for a, b in edges)
+    readsback = any("ReadsBack" in r for r in reasons)
+    print(f"parsed: n={n} s={s} edges={edges_str} readsback={readsback}", flush=True)
 
 work = os.path.join(SI, "work", "pipeline", gap)
 os.makedirs(work, exist_ok=True)
@@ -54,9 +60,12 @@ def run(cmd, **kw):
     return r
 
 raw = os.path.join(work, "raw.lean")
-run([sys.executable, "mkrow.py", str(n), str(s), edges_str, raw, f"PEqualNP.Outside.{gap}",
-     "--work", os.path.join(work, "cache")],
-    cwd=os.path.join(REPO, "notes/data/lrat-link"))
+if link_mode:
+    open(raw, "w").write("")  # no generated part: the proof is Link specialized
+else:
+    run([sys.executable, "mkrow.py", str(n), str(s), edges_str, raw, f"PEqualNP.Outside.{gap}",
+         "--work", os.path.join(work, "cache")],
+        cwd=os.path.join(REPO, "notes/data/lrat-link"))
 inlined = os.path.join(work, "inlined.lean")
 run([sys.executable, os.path.join(SI, "importer.py"), raw, gap,
      os.path.join(REPO, "lean/PEqualNP/Library/LRAT/Checker.lean"),
@@ -64,13 +73,21 @@ run([sys.executable, os.path.join(SI, "importer.py"), raw, gap,
      os.path.join(REPO, "lean/PEqualNP/MetaComplexity/Helpers/Shannon.lean"), inlined])
 
 src = open(inlined).read()
-src = src.replace("set_option maxRecDepth 1000000\n", "")
-src = src.replace("set_option maxHeartbeats 0\n", "")
-src = src.replace("theorem unsat",
-                  "set_option maxRecDepth 1000000 in\nset_option maxHeartbeats 0 in\ntheorem unsat", 1)
-lam = "fun C hm hr he => " if readsback else "fun C hm he => "
-final = (f"\ntheorem PEqualNP.Outside.{gap} : {stmt} :=\n"
-         f"  {lam}PEqualNP.Outside.{gap}.lower C hm he\n")
+if link_mode:
+    aux = f"PEqualNP.Outside.{gap}_aux.Link"
+    final = (f"\ntheorem PEqualNP.Outside.{gap} : {stmt} := by\n"
+             f"  intro rows g C bounded monotone small agrees\n"
+             f"  have valid := {aux}.valid_ofCirc {n} {s} g (· ∈ rows) C monotone small agrees\n"
+             f"  obtain ⟨M, hv, normal⟩ := {aux}.exists_nf ⟨_, valid⟩\n"
+             f"  exact ⟨{aux}.val {n} {s} M, {aux}.enc_sat bounded hv normal⟩\n")
+else:
+    src = src.replace("set_option maxRecDepth 1000000\n", "")
+    src = src.replace("set_option maxHeartbeats 0\n", "")
+    src = src.replace("theorem unsat",
+                      "set_option maxRecDepth 1000000 in\nset_option maxHeartbeats 0 in\ntheorem unsat", 1)
+    lam = "fun C hm hr he => " if readsback else "fun C hm he => "
+    final = (f"\ntheorem PEqualNP.Outside.{gap} : {stmt} :=\n"
+             f"  {lam}PEqualNP.Outside.{gap}.lower C hm he\n")
 src = src.rstrip() + "\n" + final
 out = os.path.join(work, f"{gap}.lean")
 open(out, "w").write(src)
