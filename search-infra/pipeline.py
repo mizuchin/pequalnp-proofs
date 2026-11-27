@@ -4,12 +4,16 @@
 Input: gap id + the exact posted statement text.
 Chain: classify -> parse (n, s, edges) -> mkrow -> importer (inline LRAT)
 -> shape (set_option `in` form + final theorem with the exact statement)
--> size check (512 KiB) -> place in tree -> lake build -> remove.
+-> size check (512 KiB) -> place in tree -> outside-guard (gap-of-file,
+imports, closure) -> lake build -> remove.
+Usage: pipeline.py GAP statement.txt [--keep] [--imports M1,M2,...]
+The guard's listed imports default to ["PEqualNP.Defs"]; pass --imports
+with the desk row's list when it differs.
 The final theorem is proved from the generated `lower`; a ReadsBack
 hypothesis (classifier: droppable side condition) is introduced and ignored.
 Usage: pipeline.py GAP statement.txt [--keep]
 """
-import os, re, shutil, subprocess, sys
+import json, os, re, shutil, subprocess, sys
 
 BASE = os.path.expanduser("~/workspace/pequalnp-muse")
 REPO = os.path.join(BASE, "pequalnp-proofs")
@@ -19,6 +23,9 @@ from classify import classify
 
 gap, stmt_path = sys.argv[1], sys.argv[2]
 keep = "--keep" in sys.argv
+listed_imports = ["PEqualNP.Defs"]
+if "--imports" in sys.argv:
+    listed_imports = sys.argv[sys.argv.index("--imports") + 1].split(",")
 stmt = " ".join(open(stmt_path).read().split())
 cls, reasons = classify(stmt)
 print(f"classify: {cls} | {'; '.join(reasons)}", flush=True)
@@ -53,7 +60,8 @@ run([sys.executable, "mkrow.py", str(n), str(s), edges_str, raw, f"PEqualNP.Outs
 inlined = os.path.join(work, "inlined.lean")
 run([sys.executable, os.path.join(SI, "importer.py"), raw, gap,
      os.path.join(REPO, "lean/PEqualNP/Library/LRAT/Checker.lean"),
-     os.path.join(REPO, "lean/PEqualNP/Library/LRAT/Link.lean"), inlined])
+     os.path.join(REPO, "lean/PEqualNP/Library/LRAT/Link.lean"),
+     os.path.join(REPO, "lean/PEqualNP/MetaComplexity/Helpers/Shannon.lean"), inlined])
 
 src = open(inlined).read()
 src = src.replace("set_option maxRecDepth 1000000\n", "")
@@ -77,6 +85,21 @@ if os.path.exists(dest):
     backup = os.path.join(work, "original.lean"); shutil.copy(dest, backup)
 shutil.copy(out, dest)
 try:
+    rel = f"lean/PEqualNP/Outside/{gap}.lean"
+    gout = os.path.join(work, "guard")
+    os.makedirs(gout, exist_ok=True)
+    gap_id = "L-" + gap[2:].replace("_", "-") if gap.startswith("L_") else gap
+    gaps_json = os.path.join(work, "gaps.json")
+    with open(gaps_json, "w") as fh:
+        json.dump({"gaps": [{"id": gap_id, "file": rel,
+                             "module": f"PEqualNP.Outside.{gap}",
+                             "statement": stmt, "imports": listed_imports,
+                             "kind": "check"}]}, fh)
+    guard = os.path.join(REPO, ".github/scripts/outside-guard.mjs")
+    run(["node", guard, "gap-of-file", gaps_json, rel, gout], cwd=REPO)
+    run(["node", guard, "imports", rel, os.path.join(gout, "imports.json"), rel], cwd=REPO)
+    run(["node", guard, "closure", ".", os.path.join(gout, "imports.json"), rel, gout], cwd=REPO)
+    print("GUARD OK", flush=True)
     r = subprocess.run(["lake", "build", f"PEqualNP.Outside.{gap}"],
                        capture_output=True, text=True, env=env, cwd=os.path.join(REPO, "lean"))
     print("build exit:", r.returncode, flush=True)

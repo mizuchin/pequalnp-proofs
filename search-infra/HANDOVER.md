@@ -29,17 +29,23 @@ main を fast-forward のみで追随し、build する（ローカル main に�
 ### M3: 分類器 + A 型の完全自動化
 - `search-infra/classify.py`: 宣言文テキストから A/B/C を規則ベースで判定。マージ済み5件で検証済み
   （2229→A、5531→B の正確サイズ型、3644→C、10000/10002→C の被覆系）
-- `search-infra/importer.py`: genrow/mkrow 出力（Library.LRAT.Link を import）を、Checker.lean +
-  Link.lean を `PEqualNP.Outside.<gap>_aux` 名前空間へ取り込んだ自己完結ファイルに変換。
-  ビルドテスト通過（2229 で 146,002 bytes、lake build exit 0）
+- `search-infra/importer.py`（v2、書式ガード対応済み）: genrow/mkrow 出力（Library.LRAT.Link を
+  import）を、Checker.lean + Link.lean を `PEqualNP.Outside.<gap>_aux` 名前空間へ取り込んだ
+  自己完結ファイルに変換。ガード（outside-guard.mjs はコメント含む生テキストを走査）への対応:
+  ライブラリ部分のコメント全除去、`macro "wdt"` を削除し使用13件を展開形に置換、import は
+  `PEqualNP.Defs` のみ（MetaComplexityLgpMono は Defs ルート配下）、Shannon は Defs ルート外なので
+  wire-fold 補題6件を aux 名前空間へコピー（L_meta_3644 と同じやり方）、open から Helpers を除去
 - `search-infra/pipeline.py`: 入力は gap id と宣言文テキストのみ。分類A → パラメータ抽出 →
-  mkrow → 取り込み → 整形 → 512 KiB 検査 → lake build。統合テスト通過（2229、148,304 bytes、build exit 0）
-  → **A 型ステップは宣言文を渡すだけで提出ファイルまで作れる**
+  mkrow → 取り込み → 整形 → 512 KiB 検査 → **書式ガード3コマンド（gap-of-file / imports /
+  closure）** → lake build。再検証通過（2026-11-27、2229 で 137,262 bytes、GUARD OK、build exit 0。
+  再生成ファイルはブランチの `search-infra/examples/L_meta_2229.lean` に置いた）
+  → **A 型ステップは宣言文を渡すだけで、ガード込みで提出ファイルまで作れる**
 
 ### M4 調査: B は3亜種（`search-infra/m4-survey.md`）
 - **B-promise**（RepSizeAtMost / マスク型）: ライブラリほぼ完備。Promise.lean は Link2 の `enc2`
-  （= Defs の enc + fLex、単調・NOT 無し）を使う。接続点は `rep_lower_mask (n m M s)` で、
-  必要なのは `¬ FormulaSat (enc2 (n+m) s (gMask n m M) (repRows n m))`
+  （= Defs の enc + fLex、単調・NOT 無し）を使う。接続点は `rep_lower_mask (n m M s)`
+  （PromiseGen.lean の79行目）で、必要なのは
+  `¬ FormulaSat (enc2 (n+m) s (gMask n m M) (repRows n m))`
 - **B-readcount**（lineDegrees による読み取り回数上限）: ライブラリ支援なし。例 L_meta_1388 の証明構造の読解から
 - **B-firstgate**: 名前で引ける実例は未発見。デスクの実例待ち
 
@@ -56,6 +62,9 @@ main を fast-forward のみで追随し、build する（ローカル main に�
 2. 分類器に RepSizeAtMost / マスク型の (n, m, M, s) 抽出を追加し、pipeline の B-promise 分岐を生やす
 3. B-readcount: L_meta_1388 のマージ済み証明の構造を読むところから
 4. M5（方向4）: L_meta_5531 型（下限は LRAT、上限は回路の明示）の一般化で1件通す案
+5. 分類への追加候補「link 特化型」（Claude Code の提案）: L_meta_3644 は Link.lean の定理 `link` を
+   n=10, s=14 に特化しただけの主張で、SAT は要らず証明の取り込みで機械的に作れる。帰着の仮定として
+   受付に出てくる種類。ガード対応済みの取り込み器が前提になる（対応済み）
 
 ## 作業記録
 
