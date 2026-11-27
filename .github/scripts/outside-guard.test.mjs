@@ -527,3 +527,190 @@ test('value cli: gap writes the instance to statement.txt and check to gap.kind;
   r = cli('imports', pj(d, 'v.lean'), pj(d, 'imports.json'), VF(6), 'reduce');
   assert.equal(r.status, 1); assert.match(r.stdout, /is a value file/);
 });
+
+// THE STEP'S ROW BY ID (25 Nov): both workflows fetch the desk's row for the one gap from one account-bound address,
+// never the whole list and never through pequalnp.com's DNS, and the advisory's id is the one its file belongs to.
+import { GAP_RE as GAP_RE_ROW, rowOfFile as rowOfFileRow } from './outside-guard.mjs';
+test('both workflows: the row by id from the one desk address, and the advisory id names the file\'s row', () => {
+  const wfs = ['authoritative.yml', 'advisory.yml'].map((n) => [n, readFileSync(new URL(`../workflows/${n}`, import.meta.url), 'utf8')]);
+  const urls = wfs.map(([n, wf]) => {
+    assert.doesNotMatch(wf, /data\.pequalnp\.com|gaps\.json"? *"\$GAPS_URL|GAPS_URL/, `${n}: still fetches the whole list`);
+    const m = wf.match(/^\s+ROW_URL: (\S+)$/m); assert.ok(m, `${n}: no ROW_URL`);
+    assert.equal(wf.match(/curl [^\n]*\$ROW_URL/g)?.length, 1, `${n}: fetches the row other than once`);
+    return m[1];
+  });
+  assert.equal(urls[0], urls[1], 'the two workflows read different desks');
+  assert.equal(urls[0], 'https://pequalnp-desk.pequalnp.workers.dev/desk/row?gap=');
+  assert.match(wfs[0][1], /curl [^\n]*--max-redirs 0[^\n]*"\$ROW_URL\$GAP"/);
+  const line = wfs[1][1].match(/^\s+(gap="L-\$\(basename "\$FILE" \.lean \| cut -c3- \| tr _ -\)")$/m); assert.ok(line, 'advisory: no gap line');
+  assert.match(wfs[1][1], /curl [^\n]*--max-redirs 0[^\n]*"\$ROW_URL\$gap"/);
+  for (const id of ['L-meta-632', 'L-gct-101', 'L-x-0', 'L-clb-034']) {
+    const file = `lean/PEqualNP/Outside/${id.replace(/-/g, '_')}.lean`;
+    const r = spawnSync('sh', ['-c', `${line[1]}; printf %s "$gap"`], { env: { PATH: process.env.PATH, FILE: file }, encoding: 'utf8' });
+    assert.equal(r.stdout, id); assert.ok(GAP_RE_ROW.test(r.stdout));
+    assert.ok(rowOfFileRow(file)({ id, file }), `${file} is not the row of ${id}`);
+  }
+});
+
+// THE GUARD MUST SHOW ITS WORK (2026-11-26, the operator's order, security first; redteam-1's spec, section 4).
+// (a) main is decided by REAL path, so a symlinked call or a path with '#' or a space runs the checks; a run that
+//     names the guard but is not main is a FAULT (exit 3), never a silent 0. (b) every mode ends on GUARD OK: <mode>.
+import { cpSync, mkdirSync, symlinkSync } from 'node:fs';
+import { ranAsScript } from './outside-guard.mjs';
+{
+  const okLine = (r, mode) => { assert.equal(r.status, 0, r.stdout + r.stderr); assert.equal(r.stdout.trimEnd().split('\n').at(-1), `GUARD OK: ${mode}`); };
+  const fixtures = (d) => {
+    wf(pj(d, 'row.json'), JSON.stringify(krow(undefined)));
+    wf(pj(d, 'imports.json'), '[]');
+    wf(pj(d, 'clean.lean'), 'import Mathlib\ntheorem PEqualNP.Outside.L_meta_632 : True := trivial\n');
+    wf(pj(d, 'evil.lean'), 'import Mathlib\n#eval 1\ntheorem PEqualNP.Outside.L_meta_632 : True := trivial\n');
+    const sha = 'a'.repeat(40), blob = 'b'.repeat(40);
+    wf(pj(d, 'pr.json'), JSON.stringify({ state: 'open', base: { repo: { full_name: 'o/r' }, ref: 'main' }, head: { sha }, user: { login: 'someone' }, changed_files: 1 }));
+    wf(pj(d, 'files.json'), JSON.stringify([{ filename: KF, status: 'added', sha: blob }]));
+    wf(pj(d, 'tree.json'), JSON.stringify({ truncated: false, tree: [{ path: KF, type: 'blob', mode: '100644', sha: blob, size: 60 }] }));
+    mkdirSync(pj(d, 'out'), { recursive: true });
+  };
+  const every = (call, d) => {
+    okLine(call('pr', pj(d, 'pr.json'), pj(d, 'files.json'), pj(d, 'tree.json'), 'o/r', 'main', pj(d, 'out')), 'pr');
+    okLine(call('gap', pj(d, 'row.json'), 'L-meta-632', KF, pj(d, 'out'), 'check'), 'gap');
+    okLine(call('gap-of-file', pj(d, 'row.json'), KF, pj(d, 'out')), 'gap-of-file');
+    okLine(call('imports', pj(d, 'clean.lean'), pj(d, 'imports.json'), KF, 'check'), 'imports');
+    okLine(call('closure', d, pj(d, 'imports.json'), KF, pj(d, 'out'), 'check'), 'closure');
+    const bad = call('imports', pj(d, 'evil.lean'), pj(d, 'imports.json'), KF, 'check');
+    assert.equal(bad.status, 1); assert.match(bad.stdout, /^REFUSED: /); assert.doesNotMatch(bad.stdout, /GUARD OK/);
+  };
+  test('guard shows its work: every mode ends on GUARD OK: <mode>, and a refusal never does', () => {
+    const d = mkdtempSync(pj(tmpdir(), 'guard-ok-')); fixtures(d); every(cli, d);
+  });
+  for (const [name, dirName] of [['a symlinked path', null], ['a path with a hash sign', 'a#b'], ['a path with a space', 'a b']]) {
+    test(`guard shows its work: called through ${name}, the checks run (no silent 0)`, () => {
+      const d = mkdtempSync(pj(tmpdir(), 'guard-path-')); fixtures(d);
+      let g;
+      if (dirName === null) { g = pj(d, 'linked-guard.mjs'); symlinkSync(GUARD, g); }
+      else { mkdirSync(pj(d, dirName)); g = pj(d, dirName, 'outside-guard.mjs'); cpSync(GUARD, g); }
+      every((...args) => spawnSync(process.execPath, [g, ...args], { encoding: 'utf8' }), d);
+    });
+  }
+  test('guard shows its work: through a symlinked FOLDER as well (the Mac /tmp case)', () => {
+    const d = mkdtempSync(pj(tmpdir(), 'guard-dirlink-')); fixtures(d);
+    mkdirSync(pj(d, 'real')); cpSync(GUARD, pj(d, 'real', 'outside-guard.mjs')); symlinkSync(pj(d, 'real'), pj(d, 'link'));
+    every((...args) => spawnSync(process.execPath, [pj(d, 'link', 'outside-guard.mjs'), ...args], { encoding: 'utf8' }), d);
+  });
+  test('guard shows its work: a run that names the guard but does not reach main is a FAULT, exit 3', () => {
+    const d = mkdtempSync(pj(tmpdir(), 'guard-skip-')); mkdirSync(pj(d, 'w'));
+    wf(pj(d, 'w', 'outside-guard.mjs'), `import ${JSON.stringify(GUARD)};\n`);   // another file of that name that only imports it
+    const r = spawnSync(process.execPath, [pj(d, 'w', 'outside-guard.mjs'), 'imports', 'x', 'y', KF], { encoding: 'utf8' });
+    assert.equal(r.status, 3); assert.match(r.stdout, /^FAULT: the guard was started but did not run its checks/); assert.doesNotMatch(r.stdout, /GUARD OK/);
+  });
+  test('guard shows its work: ranAsScript compares real paths and is false when imported', () => {
+    const d = mkdtempSync(pj(tmpdir(), 'guard-ras-')); symlinkSync(GUARD, pj(d, 'l.mjs'));
+    const url = new URL(`file://${GUARD}`).href;
+    assert.equal(ranAsScript(url, pj(d, 'l.mjs')), true);
+    assert.equal(ranAsScript(url, pj(d, 'missing.mjs')), false);
+    assert.equal(ranAsScript(url, undefined), false);
+  });
+}
+
+// THE NUMBER OF A REDUCTION (2026-11-26): k free on the base and in EARLIER open pull requests, else refused
+// at the door with the smallest free k named. Later and stale open pull requests do not count.
+import { checkCutNumber, STALE_HOURS, MAX_HELD } from './outside-guard.mjs';
+import { createHash } from 'node:crypto';
+{
+  const F = (k) => `lean/PEqualNP/Outside/R_meta_4013_${k}.lean`;
+  const now = Date.parse('2026-11-26T03:00:00Z');
+  const ago = (h) => new Date(now - h * 3600e3).toISOString();
+  const base = ['R_meta_4013_1.lean', 'R_meta_4013_2.lean', 'L_meta_4013.lean', 'R_meta_40130_3.lean'];
+  const say = (re) => (e) => re.test(e.message) && !e.message.includes(':');
+  test('cut number: a free k passes', () => assert.deepEqual(checkCutNumber(F(3), base, [], 500, now), { k: 3 }));
+  test('cut number: a k on the base is refused and names the smallest free one', () =>
+    assert.throws(() => checkCutNumber(F(2), base, [], 500, now), say(/number 2 of this step is already a file on main.*R_meta_4013_3\.lean.*PEqualNP\.Outside\.R_meta_4013_3/)));
+  test('cut number: another step with a longer id does not count (R_meta_40130_3 is not R_meta_4013_3)', () =>
+    assert.deepEqual(checkCutNumber(F(3), base, [], 500, now), { k: 3 }));
+  test('cut number: an earlier open pull request holding k refuses, and its other numbers are skipped', () =>
+    assert.throws(() => checkCutNumber(F(3), base, [{ number: 400, createdAt: ago(1), files: [F(3)] }, { number: 450, createdAt: ago(1), files: [F(4)] }], 500, now),
+      say(/earlier open pull request.*R_meta_4013_5\.lean/)));
+  test('cut number: a LATER open pull request holding k does not refuse this one (the earlier keeps it)', () =>
+    assert.deepEqual(checkCutNumber(F(3), base, [{ number: 600, createdAt: ago(1), files: [F(3)] }], 500, now), { k: 3 }));
+  test('cut number: the pull request itself does not count', () =>
+    assert.deepEqual(checkCutNumber(F(3), base, [{ number: 500, createdAt: ago(1), files: [F(3)] }], 500, now), { k: 3 }));
+  test(`cut number: an open pull request older than ${STALE_HOURS} hours stops counting`, () =>
+    assert.deepEqual(checkCutNumber(F(3), base, [{ number: 400, createdAt: ago(STALE_HOURS + 1), files: [F(3)] }], 500, now), { k: 3 }));
+  test('cut number: an entry with no time or a malformed number is ignored, not trusted', () =>
+    assert.deepEqual(checkCutNumber(F(3), base, [{ number: 400, files: [F(3)] }, { number: '400', createdAt: ago(1), files: [F(3)] }, null], 500, now), { k: 3 }));
+  test('cut number: a proof file (L_) is not looked at', () => assert.equal(checkCutNumber('lean/PEqualNP/Outside/L_meta_4013.lean', base, [], 500, now), null));
+  test('cut number: every number in use says so', () => {
+    const all = Array.from({ length: 999 }, (_, i) => `R_meta_4013_${i + 1}.lean`);
+    assert.throws(() => checkCutNumber(F(7), all, [], 500, now), say(/every number from 1 to 999 is in use/));
+  });
+  test(`cut number: one account holds at most ${MAX_HELD} numbers of a step (10 open pull requests block 3)`, () => {
+    const ten = Array.from({ length: 10 }, (_, i) => ({ number: 100 + i, createdAt: ago(1), author: 'hoarder', files: [F(i + 3)] }));   // claims 3..12
+    assert.throws(() => checkCutNumber(F(5), base, ten, 500, now), say(/earlier open pull request.*R_meta_4013_6\.lean/));   // 3, 4, 5 count
+    assert.deepEqual(checkCutNumber(F(6), base, ten, 500, now), { k: 6 });   // the fourth claim holds nothing
+    assert.deepEqual(checkCutNumber(F(12), base, ten, 500, now), { k: 12 });
+    const two = [...ten, { number: 120, createdAt: ago(1), author: 'other', files: [F(6)] }];
+    assert.throws(() => checkCutNumber(F(6), base, two, 500, now), say(/earlier open pull request.*R_meta_4013_7\.lean/));   // another account's claim counts
+  });
+  test('cut number: unreadable lists refuse', () => assert.throws(() => checkCutNumber(F(3), null, [], 500, now), /could not be read/));
+  test('cut number: the command line, on a real base folder', () => {
+    const d = mkdtempSync(pj(tmpdir(), 'cutnum-')); const o = pj(d, 'lean', 'PEqualNP', 'Outside');
+    spawnSync('mkdir', ['-p', o]); wf(pj(o, 'R_meta_4013_1.lean'), ''); wf(pj(d, 'open.json'), JSON.stringify([{ number: 10, createdAt: new Date().toISOString(), files: [F(2)] }]));
+    const r1 = cli('number', F(1), d, pj(d, 'open.json'), '20');
+    assert.equal(r1.status, 1); assert.match(r1.stdout, /^REFUSED: the reduction number 1 of this step is already a file on main.*R_meta_4013_3\.lean/);
+    const r2 = cli('number', F(3), d, pj(d, 'open.json'), '20');
+    assert.equal(r2.status, 0); assert.match(r2.stdout, /number 3 is free/); assert.equal(r2.stdout.trimEnd().split('\n').at(-1), 'GUARD OK: number');
+    const r3 = cli('number', 'lean/PEqualNP/Outside/L_meta_4013.lean', d, pj(d, 'open.json'), '20');
+    assert.equal(r3.status, 1); assert.match(r3.stdout, /^REFUSED: the number check is for a reduction file/); assert.doesNotMatch(r3.stdout, /GUARD OK/);
+    assert.equal(cli('number', F(3), d, pj(d, 'open.json'), 'x').status, 1);
+  });
+  // THE OPEN CLAIMS FROM THE INTAKE (2026-11-26): the workflow's own lines for a reduction run, run here on a real
+  // base folder. No list call: the claims are the input open_claims. Absent or malformed is a FAULT, never a pass.
+  test('cut number: the open claims input, absent and malformed FAULT, a claimed k refused, a free k passes', () => {
+    const wfl = readFileSync(new URL('../workflows/authoritative.yml', import.meta.url), 'utf8');
+    assert.doesNotMatch(wfl, /graphql|pullRequests\(/, 'a list call is still made');
+    const lines = wfl.split('\n'); const i = lines.findIndex((l) => l.includes('[ -n "$OPEN_CLAIMS" ]')); const j = lines.findIndex((l) => l.includes('cat "$W/api/claims.out"'));
+    assert.ok(i > 0 && j > i, 'the open claims lines are not in the workflow'); const block = lines.slice(i, j + 1).join('\n');
+    const W = mkdtempSync(pj(tmpdir(), 'claims-')); spawnSync('mkdir', ['-p', pj(W, 'base', '.github'), pj(W, 'api'), pj(W, 'base', 'lean', 'PEqualNP', 'Outside')]);
+    spawnSync('ln', ['-s', new URL('.', import.meta.url).pathname, pj(W, 'base', '.github', 'scripts')]);
+    wf(pj(W, 'base', 'lean', 'PEqualNP', 'Outside', 'R_meta_4013_1.lean'), '');
+    const run = (claims, k = 3) => {
+      spawnSync('rm', ['-f', pj(W, 'api', 'open.json')]); wf(pj(W, 'pr.file'), F(k));
+      return spawnSync('bash', ['-euc', `mkdir -p "$W/in"; cp "$W/pr.file" "$W/in/pr.file"\n${block}`], { encoding: 'utf8', env: { PATH: process.env.PATH, W, OPEN_CLAIMS: claims } });
+    };
+    const last = (r) => r.stdout.trimEnd().split('\n').at(-1);
+    const recent = new Date(Date.now() - 3600e3).toISOString();
+    const h = (login) => createHash('sha256').update(login.toLowerCase()).digest('hex').slice(0, 12);   // the intake's author hash
+    let r = run('');
+    assert.equal(r.status, 1); assert.equal(last(r), 'FAULT: a reduction run needs the open claims from the intake (input open_claims) and none came; nothing was judged');
+    // C1: a quote, a dollar sign, a backtick and a newline: the fixed FAULT line, and nothing of it runs
+    r = run(`"'; touch "$W/pwned1"; $(touch "$W/pwned2") \`touch "$W/pwned3"\`\n[]`);
+    assert.equal(r.status, 1); assert.equal(last(r), 'FAULT: the open claims from the intake are malformed; nothing was judged');
+    for (const n of [1, 2, 3]) assert.throws(() => readFileSync(pj(W, `pwned${n}`)), `the input ran a command (${n})`);
+    for (const bad of ['not json', '{}', JSON.stringify([{ number: 400, createdAt: recent, author: h('a'), files: ['lean/PEqualNP/Outside/R_meta_40130_3.lean'] }]),
+      JSON.stringify([{ number: 400, createdAt: recent, author: 'someone', files: [F(3)] }]), JSON.stringify([{ number: 400, createdAt: recent, author: h('a').toUpperCase(), files: [F(3)] }]),
+      JSON.stringify([{ number: 400, createdAt: recent, author: createHash('sha256').update('a').digest('hex'), files: [F(3)] }]),
+      JSON.stringify([{ number: '400', createdAt: recent, author: h('a'), files: [F(3)] }]), JSON.stringify([{ number: 400, createdAt: recent, author: h('a'), files: [F(3)], extra: 1 }]),
+      JSON.stringify([{ number: 400, createdAt: 'yesterday', author: h('a'), files: [F(3)] }]), JSON.stringify([{ number: 400, createdAt: recent, author: h('a'), files: [] }]), 'x'.repeat(40001)]) {
+      r = run(bad);
+      assert.equal(r.status, 1, bad.slice(0, 80)); assert.match(last(r), /^FAULT: the open claims from the intake (are malformed|are longer than 40000 characters); nothing was judged$/, bad.slice(0, 80));
+      assert.throws(() => readFileSync(pj(W, 'api', 'open.json')), 'a refused list was written');
+    }
+    const claims = JSON.stringify([{ number: 400, createdAt: recent, author: h('a'), files: [F(3)] }, { number: 600, createdAt: recent, author: null, files: [F(4)] }]);
+    r = run(claims, 3);
+    assert.equal(r.status, 0, r.stdout + r.stderr); assert.equal(last(r), 'GUARD OK: claims');
+    const g = cli('number', F(3), pj(W, 'base'), pj(W, 'api', 'open.json'), '500');
+    assert.equal(g.status, 1); assert.match(g.stdout, /^REFUSED: the reduction number 3 of this step is the file of an earlier open pull request.*R_meta_4013_2\.lean/);
+    r = run(claims, 5); assert.equal(r.status, 0, r.stdout);
+    assert.equal(cli('number', F(5), pj(W, 'base'), pj(W, 'api', 'open.json'), '500').status, 0, 'a free k did not pass');
+    r = run('[]', 3); assert.equal(r.status, 0, r.stdout); assert.equal(readFileSync(pj(W, 'api', 'open.json'), 'utf8'), '[]');
+    // three numbers per account with 12-hex authors: one hash on 2..5 holds 2, 3, 4; another hash's claim on 5 counts
+    const four = [2, 3, 4, 5].map((k, n) => ({ number: 100 + n, createdAt: recent, author: h('Hoarder'), files: [F(k)] }));
+    r = run(JSON.stringify(four), 5); assert.equal(r.status, 0, r.stdout);
+    assert.equal(cli('number', F(5), pj(W, 'base'), pj(W, 'api', 'open.json'), '500').status, 0, 'a fourth claim of one account held a number');
+    assert.match(cli('number', F(4), pj(W, 'base'), pj(W, 'api', 'open.json'), '500').stdout, /^REFUSED: the reduction number 4 of this step is the file of an earlier open pull request/);
+    r = run(JSON.stringify([...four, { number: 104, createdAt: recent, author: h('other'), files: [F(5)] }]), 5); assert.equal(r.status, 0, r.stdout);
+    assert.match(cli('number', F(5), pj(W, 'base'), pj(W, 'api', 'open.json'), '500').stdout, /^REFUSED: the reduction number 5 of this step is the file of an earlier open pull request/);
+    // the bound: 100 open pull requests of one step, the longest step id, fit the 40000 characters
+    const stem = `R_${'a'.repeat(62)}`; const worst = Array.from({ length: 100 }, (_, n) => ({ number: 9000000 + n, createdAt: '2026-11-26T12:00:00.000Z', author: 'f'.repeat(12), files: [`lean/PEqualNP/Outside/${stem}_999.lean`] }));
+    assert.ok(JSON.stringify(worst).length <= 40000, `100 worst case claims are ${JSON.stringify(worst).length} characters`);
+  });
+}

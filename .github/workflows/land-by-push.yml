@@ -71,4 +71,6 @@ jobs:
           set -euo pipefail
           export LAND_DIR="$RUNNER_TEMP/store"
           mkdir -p "$LAND_DIR"
-          node "$RUNNER_TEMP/scripts/land-by-push.mjs" | tee -a "$GITHUB_STEP_SUMMARY"
+          node "$RUNNER_TEMP/scripts/land-by-push.mjs" | tee -a "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/land.out"
+          # the script's fixed last line (2026-11-26): an exit 0 that printed nothing is a FAULT, never a quiet success
+          [ "$(tail -n 1 "$RUNNER_TEMP/land.out")" = "LAND OK" ] || { echo "FAULT: land-by-push did not say LAND OK"; exit 1; }

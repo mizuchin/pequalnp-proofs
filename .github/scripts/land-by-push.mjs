@@ -18,6 +18,8 @@
 // The merge commits carry OUR fixed message and the project identity. Before the push the new tip's tree against
 // the old tip is exactly the landed files; the push never forces; a rejected push is rebuilt once on the new tip.
 import { execFileSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { FILE_RE, MAX_BYTES } from './outside-guard.mjs';
 
 export const MAX_ENTRIES = 50;
@@ -99,6 +101,8 @@ export function gitIn(dir, auth) {
   const base = ['-c', 'core.hooksPath=/dev/null', '-c', 'fetch.fsckObjects=true', '-c', 'transfer.fsckObjects=true', '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always', '-c', `protocol.file.allow=${process.env.LAND_TEST_FILE_TRANSPORT === '1' ? 'always' : 'never'}`, '-C', dir];
   const git = (args, opts = {}) => execFileSync('git', base.concat(args), { env: { ...env, ...(opts.env || {}) }, encoding: 'utf8', maxBuffer: 8 << 20, stdio: ['ignore', 'pipe', 'pipe'], timeout: opts.timeout ?? 120000 }).replace(/\n$/, '');
   git.ok = (args, opts) => { try { git(args, opts); return true; } catch { return false; } };
+  // A call whose output is read whether or not it succeeds (git push --porcelain prints its status lines on a refusal too).
+  git.out = (args, opts = {}) => { try { return { ok: true, out: git(args, opts) }; } catch (e) { return { ok: false, out: String(e.stdout ?? '') }; } };
   return git;
 }
 
@@ -172,7 +176,47 @@ export function apiParents(repo, auth) {
   };
 }
 
-export function run({ dir, remote, listJson, extraNames, auth, parentsOf, log = console.log }) {
+// THE PUSH, RETRIED ON A FAST-FORWARD REFUSAL ONLY (red team, both seats, 25 Nov): main moves every few seconds while the
+// squash path merges, so a chain built on one tip is often refused as not a fast-forward. The refusal is read from git's
+// own machine status (`git push --porcelain`: flag "!", "[rejected]" with "fetch first" or "non-fast-forward"), never from
+// a server's text; any other refusal is a FAULT at once. Each retry fetches main fresh, reads every head again and reruns
+// EVERY check from the start against the new tip, so a head whose path a squash landing put on main meanwhile is LEFT OUT
+// (back to the squash path), never pushed over. At most MAX_TRIES tries, a short random wait between, a total time bound
+// well inside the job's twenty minutes; never a force. One line per attempt; "landed" only after the push that went through.
+export const MAX_TRIES = 10, TOTAL_MS = 5 * 60 * 1000;
+export function pushStatus(out) {
+  // 'pushed' | 'fast-forward' | 'other', from the porcelain status line of refs/heads/main.
+  const line = String(out || '').split('\n').find((l) => l.split('\t')[1]?.endsWith(':refs/heads/main'));
+  if (!line) return 'other';
+  const [flag, , summary = ''] = line.split('\t');
+  if ([' ', '+', '*', '='].includes(flag)) return 'pushed';
+  if (flag === '!' && /^\[rejected\] \((fetch first|non-fast-forward)\)$/.test(summary.trim())) return 'fast-forward';
+  return 'other';
+}
+// THE KIND OF ANOTHER REFUSAL, AS DATA (operator, 25 Nov, after run 45708355672): the porcelain flag and summary of the
+// line for refs/heads/main, through a strict filter (letters, digits, space and ( ) [ ] . , : -, at most 120 characters).
+// It is printed so the kind can be seen; nothing in this file decides anything from it.
+export function pushKind(out) {
+  const line = String(out || '').split('\n').find((l) => l.split('\t')[1]?.endsWith(':refs/heads/main'));
+  if (!line) return 'no status line for main';
+  const [flag, , summary = ''] = line.split('\t');
+  // git's one-character flag is named (the filter keeps no "!"); the summary passes the filter.
+  const name = { ' ': 'ok', '+': 'forced', '*': 'new', '=': 'up to date', '-': 'deleted', '!': 'refused' }[flag] ?? 'unknown';
+  return `flag ${name}, summary ${summary}`.replace(/[^A-Za-z0-9 ()[\].,:-]/g, '').slice(0, 120);
+}
+// A REMOTE REJECTION RETRIED ONLY IF MAIN MOVED, PREPARED AND OFF (operator, 25 Nov; for the red team): git's own status
+// word "[remote rejected]" (flag "!"; the reason in brackets after it is the server's and is never read), and then OUR
+// fact, read from git: after a fresh fetch, main's tip is not the tip this attempt was built on. Main did not move: a
+// FAULT at once. OFF until the red team rules on the kind.
+export const RETRY_REMOTE_REJECTED_IF_MAIN_MOVED = false, MAX_REMOTE_RETRIES = 3;   // the red team's term (2): at most three in a run
+export function remoteRejected(out) {
+  const line = String(out || '').split('\n').find((l) => l.split('\t')[1]?.endsWith(':refs/heads/main'));
+  if (!line) return false;
+  const [flag, , summary = ''] = line.split('\t');
+  return flag === '!' && summary.trim().startsWith('[remote rejected]');
+}
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+export function run({ dir, remote, listJson, extraNames, auth, parentsOf, log = console.log, beforePush = () => {}, maxTries = MAX_TRIES, totalMs = TOTAL_MS, waitMs = () => 500 + Math.floor(Math.random() * 2500), retryRemoteRejected = RETRY_REMOTE_REJECTED_IF_MAIN_MOVED }) {
   const list = parseList(listJson);
   const names = reserved(extraNames);
   const git = gitIn(dir, auth);
@@ -180,8 +224,10 @@ export function run({ dir, remote, listJson, extraNames, auth, parentsOf, log = 
   git(['remote', 'add', 'origin', remote]);
   const fetchMain = () => { git(['fetch', '-q', '--no-tags', '--no-recurse-submodules', 'origin', '+refs/heads/main:refs/land/main']); return git(['rev-parse', 'refs/land/main']); };
   let tip0 = fetchMain();
+  const began = Date.now(); let remoteRetries = 0;
   // A head is fetched only after its parent, read through the API, is shown to be on main: such a head brings one
   // commit, its trees and one file. A fetch that fails or takes over 30 seconds leaves that entry out (red team, 20:13Z).
+  const readHeads = () => {
   const heads = {};
   for (const e of list) {
     let parents;
@@ -201,21 +247,43 @@ export function run({ dir, remote, listJson, extraNames, auth, parentsOf, log = 
       if (n > 16) heads[e.pr] = 'too many objects';
     }
   }
-  for (let attempt = 0; attempt < 2; attempt++) {
+  return heads;
+  };
+  for (let attempt = 1; ; attempt++) {
+    if (attempt > 1) tip0 = fetchMain();   // a fresh main, then every head and every check again, from the start
+    const heads = readHeads();
     const { tip, results } = buildChain(git, list, heads, tip0, names);
     // Each entry's line is printed BEFORE the push, so a refused push still shows what was judged (rehearsal 1).
     log(report(results));
-    if (!results.some((r) => r.landed)) { log('nothing to land: no push'); return results; }
-    if (git.ok(['push', '-q', 'origin', `${tip}:refs/heads/main`])) { log('pushed: these heads are on main'); log(results.filter((r) => r.landed).map((r) => `landed #${r.pr}`).join('\n')); return results; }
-    log('the push was refused');
-    if (attempt === 0) { log('rebuilding once on a fresh read of main'); tip0 = fetchMain(); }
+    if (!results.some((r) => r.landed)) { log(`attempt ${attempt}: tip ${tip0.slice(0, 10)}: nothing in the chain`); log('nothing to land: no push'); return results; }
+    beforePush(attempt);
+    const { out } = git.out(['push', '--porcelain', 'origin', `${tip}:refs/heads/main`]);
+    const st = pushStatus(out);
+    log(`attempt ${attempt}: tip ${tip0.slice(0, 10)}: ${st === 'pushed' ? 'pushed' : st === 'fast-forward' ? 'refused, not a fast-forward' : 'refused, another kind'}`);
+    if (st === 'pushed') { log('pushed: these heads are on main'); log(results.filter((r) => r.landed).map((r) => `landed #${r.pr}`).join('\n')); return results; }
+    if (st === 'other') log(`attempt ${attempt}: the refusal's kind (data, not acted on): ${pushKind(out)}`);
+    if (st === 'other' && retryRemoteRejected && remoteRejected(out)) {
+      const now = fetchMain();
+      log(`attempt ${attempt}: main ${now === tip0 ? 'did not move' : 'moved'} since this attempt's tip`);
+      if (now === tip0) throw new Error('the push was refused by the remote and main did not move: nothing landed, nothing forced');
+      if (++remoteRetries > MAX_REMOTE_RETRIES) throw new Error(`the push was refused by the remote ${remoteRetries} times while main moved: nothing landed, nothing forced`);
+    } else if (st !== 'fast-forward') throw new Error('the push was refused, not as a fast-forward: nothing landed, nothing forced');
+    if (attempt >= maxTries || Date.now() - began >= totalMs) throw new Error(`the push was refused as not a fast-forward${retryRemoteRejected ? ' or by the remote while main moved' : ''} ${attempt} times: nothing landed, nothing forced`);
+    pause(waitMs());
   }
-  throw new Error('the push was refused twice: nothing landed, nothing forced');
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Run as a script, by REAL path (2026-11-26): the text comparison skipped run() silently when called through a
+// symlinked path; now both sides are resolved, and a call naming this file that still is not main is a FAULT.
+const ranAsScript = (url, argv1) => { if (!argv1) return false; try { return realpathSync(fileURLToPath(url)) === realpathSync(argv1); } catch { return false; } };
+if (!ranAsScript(import.meta.url, process.argv[1]) && /(^|[\/\\])land-by-push\.mjs$/.test(process.argv[1] ?? '')) {
+  console.log('FAULT: land-by-push was started but did not run (its own path and the called path differ); nothing landed');
+  process.exit(3);
+}
+if (ranAsScript(import.meta.url, process.argv[1])) {
   try {
     run({ dir: process.env.LAND_DIR, remote: process.env.LAND_REMOTE, listJson: process.env.LAND_LIST, extraNames: process.env.LAND_RESERVED_NAMES, auth: process.env.LAND_TOKEN, parentsOf: apiParents(process.env.GITHUB_REPOSITORY, process.env.LAND_TOKEN) });
+    console.log('LAND OK');   // the fixed last line the workflow requires (2026-11-26): silence is never a pass
   } catch (err) {
     console.log(`FAULT: ${String(err.message).replace(/[^A-Za-z0-9 .,:;'()#_-]/g, '?').slice(0, 300)}`);
     process.exit(3);

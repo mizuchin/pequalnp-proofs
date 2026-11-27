@@ -56,7 +56,7 @@ def lit(x):
 
 
 clauses = []
-with open(cnf) as fh:
+with open(cnf, encoding='utf-8') as fh:
     for line in fh:
         t = line.split()
         if not t or t[0] in ('c', 'p'):
@@ -66,7 +66,7 @@ with open(cnf) as fh:
 m = len(clauses)
 
 steps = []  # (id, lits, hints)
-with open(lrat) as fh:
+with open(lrat, encoding='utf-8') as fh:
     for line in fh:
         t = line.split()
         if not t or t[1] == 'd':
@@ -192,7 +192,7 @@ def wordsdef(o, nm, ws):
 rowsL = '[' + ROWS + ']'
 E2 = '--enc2' in flags
 ENC = 'enc2' if E2 else 'enc'
-with open(out, 'w') as o:
+with open(out, 'w', encoding='utf-8', newline='\n') as o:  # UTF-8 and LF on every machine
     o.write('import PEqualNP.Library.LRAT.Cube\n\n' if CUBE >= 0 else
             'import PEqualNP.Library.LRAT.LinkN2\n\n' if NOTG else
             'import PEqualNP.Library.LRAT.Link2\n\n' if E2 else 'import PEqualNP.Library.LRAT.Link\n\n')

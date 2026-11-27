@@ -5,15 +5,24 @@
 # counts comes from authoritative.yml, which runs from the base branch only.
 name: advisory
 
+# NOT RUN ON PULL REQUESTS (26 Nov 2026). For a pull request from outside this run always waited for an
+# approval that is never given (nobody approves a run of an outside pull request), so it never ran and read
+# as a queue of waiting work. The verdict that counts was always authoritative.yml, which the intake starts
+# for every pull request. This file is kept, and can be started by hand for one pull request number.
 on:
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "pull request number"
+        required: true
+        type: string
 
 # Least privilege: read the code, nothing else. No credentials are used anywhere in this file.
 permissions:
   contents: read
 
 concurrency:
-  group: advisory-${{ github.event.pull_request.number }}
+  group: advisory-${{ inputs.pr }}
   cancel-in-progress: true
 
 jobs:
@@ -22,13 +31,22 @@ jobs:
     timeout-minutes: 120
     env:
       # Values from the event go through env and a strict pattern, never into a script as text.
-      PR: ${{ github.event.pull_request.number }}
-      GAPS_URL: https://data.pequalnp.com/data/desk/gaps.json
+      PR: ${{ inputs.pr }}
+      # The desk's row for the one gap, by id: the same address as authoritative.yml (a test keeps them equal).
+      ROW_URL: https://pequalnp-desk.pequalnp.workers.dev/desk/row?gap=
       # THE PINNED ELAN, the same two values as authoritative.yml (a test keeps them equal). To bump: change
       # both files together (authoritative.yml says how to get the values).
       ELAN_VERSION: v4.4.0
       ELAN_SHA256: 0e8250aa2be86c7af929ade68db617af9edc8b9ccf6eaf5ece228250d0d032e2
     steps:
+      # THE FIRST STEP ALWAYS STOPS (red team term, 26 Nov 2026). Started by hand this job would fetch a numbered
+      # pull request and run the toolchain and the checker on it in THIS repository's context, which for an outside
+      # pull request is the same act as approving its run. So nothing below runs until this step is replaced by one
+      # that refuses, in code, any pull request whose head is not this repository.
+      - name: Not run
+        run: |
+          echo "advisory is not run. The verdict that counts is authoritative.yml, which the intake starts."
+          exit 1
       - name: Fetch the pull request (plain git, no stored credentials)
         run: |
           set -eu
@@ -63,9 +81,15 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/in"
-          curl -sSf --proto '=https' --max-redirs 0 --max-filesize 5000000 -o "$RUNNER_TEMP/in/gaps.json" "$GAPS_URL"
-          node .github/scripts/outside-guard.mjs gap-of-file "$RUNNER_TEMP/in/gaps.json" "$FILE" "$RUNNER_TEMP/in"
-          node .github/scripts/outside-guard.mjs imports "$FILE" "$RUNNER_TEMP/in/imports.json" "$FILE"
+          # The gap id from the file name the step above allowed: L_<a>_<b>.lean is gap L-<a>-<b> (ids hold no underscore).
+          gap="L-$(basename "$FILE" .lean | cut -c3- | tr _ -)"
+          curl -sSf --proto '=https' --max-redirs 0 --max-filesize 1000000 --retry 3 --retry-all-errors -o "$RUNNER_TEMP/in/gaps.json" "$ROW_URL$gap"
+          # THE GUARD MUST SHOW ITS WORK (2026-11-26): a call passes only on exit 0 AND its fixed last line
+          # "GUARD OK: <mode>"; anything else, silence included, stops the run.
+          guard() { local out; out=$(node .github/scripts/outside-guard.mjs "$@") || { printf '%s\n' "$out"; exit 1; }
+                    printf '%s\n' "$out"; [ "$(printf '%s\n' "$out" | tail -n 1)" = "GUARD OK: $1" ] || { echo "FAULT: the guard did not say GUARD OK: $1; nothing passed"; exit 1; }; }
+          guard gap-of-file "$RUNNER_TEMP/in/gaps.json" "$FILE" "$RUNNER_TEMP/in"
+          guard imports "$FILE" "$RUNNER_TEMP/in/imports.json" "$FILE"
           echo "gap: $(cat "$RUNNER_TEMP/in/gap.id")"
 
       - name: Install the pinned Lean toolchain

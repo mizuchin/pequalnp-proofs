@@ -83,6 +83,7 @@ import PEqualNP.Defs.PointTypes
 import PEqualNP.Defs.FactorSubst
 import PEqualNP.Defs.TwoColour
 import PEqualNP.Defs.Represents
+import PEqualNP.Defs.BranchingProgram
 
 /-!
 # The definitions root

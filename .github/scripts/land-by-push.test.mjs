@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { run, parseList, checkCommitText, reserved, LeftOut, MAX_ENTRIES } from './land-by-push.mjs';
+import { run, parseList, checkCommitText, reserved, LeftOut, MAX_ENTRIES, pushStatus, MAX_TRIES, pushKind, remoteRejected, RETRY_REMOTE_REJECTED_IF_MAIN_MOVED, MAX_REMOTE_RETRIES } from './land-by-push.mjs';
 
 process.env.LAND_TEST_FILE_TRANSPORT = '1';
 const ENV = { PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', LC_ALL: 'C' };
@@ -45,11 +45,11 @@ const add = (msg = 'Prove a step', env = {}) => (work, n) => {
   writeFileSync(join(work, P(n)), `theorem t${n} : True := trivial\n`);
   g(work, ['add', P(n)]); g(work, ['commit', '-q', '-m', msg], env); return P(n);
 };
-function land(w, list, extra) {
+function land(w, list, extra, opts = {}) {
   const lines = [];
   const dir = mkdtempSync(join(w.root, 'store-'));
   const parentsOf = (sha) => g(w.root, ['--git-dir', w.remote, 'rev-list', '--parents', '-n', '1', sha]).split(' ').slice(1);
-  const res = run({ dir, remote: w.remote, listJson: JSON.stringify(list), extraNames: extra, parentsOf, log: (s) => lines.push(s) });
+  const res = run({ dir, remote: w.remote, listJson: JSON.stringify(list), extraNames: extra, parentsOf, log: (s) => lines.push(s), waitMs: () => 0, ...opts });
   return { res, dir, text: lines.join('\n'), main: g(w.root, ['--git-dir', w.remote, 'rev-parse', 'main']) };
 }
 const why = (res, n) => res.find((r) => r.pr === n)?.why ?? 'landed';
@@ -119,15 +119,16 @@ test('a path that main gained after the pull request branched is left out, and t
   assert.equal(why(res, good.pr), 'landed');
 });
 
-test('a push refused twice: the line of each entry is printed before the refusal, nothing lands, the job faults', () => {
+test('a refusal of another kind (a hook): the line of each entry is printed, one attempt, nothing lands, the job faults at once', () => {
   const w = world(); const e = pr(w, add()); const bad = { ...pr(w, add()), blob: 'f'.repeat(40) };
   const before = g(w.root, ['--git-dir', w.remote, 'rev-parse', 'main']);
   writeFileSync(join(w.remote, 'hooks', 'pre-receive'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
   const lines = []; const dir = mkdtempSync(join(w.root, 'store-'));
   const parentsOf = (sha) => g(w.root, ['--git-dir', w.remote, 'rev-list', '--parents', '-n', '1', sha]).split(' ').slice(1);
-  assert.throws(() => run({ dir, remote: w.remote, listJson: JSON.stringify([e, bad]), parentsOf, log: (s) => lines.push(s) }), /refused twice/);
+  assert.throws(() => run({ dir, remote: w.remote, listJson: JSON.stringify([e, bad]), parentsOf, log: (s) => lines.push(s), waitMs: () => 0 }), /refused, not as a fast-forward/);
   const text = lines.join('\n');
-  assert.match(text, new RegExp(`in the chain #${e.pr}\nleft out #${bad.pr}: the added file is not the listed content\nthe push was refused`));
+  assert.match(text, new RegExp(`in the chain #${e.pr}\nleft out #${bad.pr}: the added file is not the listed content\nattempt 1: tip [0-9a-f]{10}: refused, another kind`));
+  assert.equal((text.match(/^attempt \d+: tip /gm) || []).length, 1);   // one attempt (its kind line is data beside it)
   assert.doesNotMatch(text, /landed #/);
   assert.equal(g(w.root, ['--git-dir', w.remote, 'rev-parse', 'main']), before);
 });
@@ -139,15 +140,106 @@ test('nothing landable: nothing is pushed, main unchanged', () => {
   assert.equal(main, before);
 });
 
-test('main moved after the fetch: the chain is rebuilt once on the new main, never forced', () => {
+// A second writer of main (the squash path), driven between our build and our push: main moves, our push is refused by
+// git as not a fast-forward ("fetch first"), which is the one refusal that is retried.
+const mover = (w, until, also = () => {}) => (attempt) => { if (attempt <= until) { also(attempt); g(w.work, ['checkout', '-q', 'main']); g(w.work, ['pull', '-q', '--ff-only', 'origin', 'main']); writeFileSync(join(w.work, 'README'), `moved ${attempt}\n`); g(w.work, ['commit', '-qam', `moved ${attempt}`]); g(w.work, ['push', '-q', 'origin', 'main']); } };
+
+test('main moved three times under the push: three fast-forward refusals, then it lands; one line per attempt; landed once', () => {
   const w = world(); const e = pr(w, add());
-  // a remote whose main moves on the first push attempt: a pre-receive hook rejects once
-  const hook = join(w.remote, 'hooks', 'pre-receive');
-  writeFileSync(hook, `#!/bin/sh\nf="${w.root}/once"\nif [ ! -e "$f" ]; then : > "$f"; unset $(env | sed -n 's/^\\(GIT_[A-Z_]*\\)=.*/\\1/p'); cd "${w.work}" && echo moved >> README && git commit -qam moved && git push -q "${w.remote}" main; exit 1; fi\nexit 0\n`, { mode: 0o755 });
-  const { res, text } = land(w, [e]);
+  const { res, text, main } = land(w, [e], undefined, { beforePush: mover(w, 3) });
   assert.equal(why(res, e.pr), 'landed');
-  assert.match(text, /the push was refused\nrebuilding once/);
-  assert.match(text, new RegExp(`in the chain #${e.pr}[\\s\\S]*pushed: these heads are on main\\nlanded #${e.pr}`));
+  assert.deepEqual(text.match(/^attempt \d+: tip [0-9a-f]{10}: .*$/gm).map((l) => l.replace(/tip [0-9a-f]{10}/, 'tip T')),
+    ['attempt 1: tip T: refused, not a fast-forward', 'attempt 2: tip T: refused, not a fast-forward', 'attempt 3: tip T: refused, not a fast-forward', 'attempt 4: tip T: pushed']);
+  assert.equal((text.match(/^landed #/gm) || []).length, 1);
+  assert.ok(g(w.root, ['--git-dir', w.remote, 'merge-base', '--is-ancestor', e.head, main]) === '');
+  assert.equal(g(w.root, ['--git-dir', w.remote, 'log', '-1', '--format=%s', main]), `Land L-meta-9 (#${e.pr}) by someone`);
+});
+
+test('main moving at every try: at most MAX_TRIES attempts, then a FAULT; nothing landed, nothing forced', () => {
+  const w = world(); const e = pr(w, add()); let tips = [];
+  assert.throws(() => land(w, [e], undefined, { beforePush: mover(w, 99, () => tips.push(g(w.root, ['--git-dir', w.remote, 'rev-parse', 'main']))) }), new RegExp(`not a fast-forward ${MAX_TRIES} times`));
+  assert.equal(tips.length, MAX_TRIES);
+  assert.throws(() => g(w.root, ['--git-dir', w.remote, 'merge-base', '--is-ancestor', e.head, 'main']));   // the head is not on main
+});
+
+test('the time bound stops the retries early', () => {
+  const w = world(); const e = pr(w, add());
+  assert.throws(() => land(w, [e], undefined, { beforePush: mover(w, 99), totalMs: 0 }), /not a fast-forward 1 times/);
+});
+
+test('a path that appears on main between tries is left out on the retry and goes back; the other head lands', () => {
+  const w = world(); const e = pr(w, add()); const good = pr(w, add());
+  const samePath = () => { g(w.work, ['checkout', '-q', 'main']); g(w.work, ['pull', '-q', '--ff-only', 'origin', 'main']); writeFileSync(join(w.work, e.path), 'theorem other : True := trivial\n'); g(w.work, ['add', e.path]); g(w.work, ['commit', '-qm', 'same path by the squash path']); g(w.work, ['push', '-q', 'origin', 'main']); };
+  const { res, text, main } = land(w, [e, good], undefined, { beforePush: (a) => { if (a === 1) samePath(); } });
+  assert.equal(why(res, e.pr), 'the path already exists on main');
+  assert.equal(why(res, good.pr), 'landed');
+  assert.match(text, /attempt 1: tip [0-9a-f]{10}: refused, not a fast-forward\n[\s\S]*left out #\d+: the path already exists on main[\s\S]*attempt 2: tip [0-9a-f]{10}: pushed/);
+  assert.notEqual(g(w.root, ['--git-dir', w.remote, 'show', `${main}:${e.path}`]), 'theorem t' + e.pr + ' : True := trivial');
+});
+
+// A remote that refuses with a hook: once while main moves under it (another writer), or always with main still.
+const hookOnce = (w) => writeFileSync(join(w.remote, 'hooks', 'pre-receive'), `#!/bin/sh\nf="${w.root}/once"\nif [ ! -e "$f" ]; then : > "$f"; unset $(env | sed -n 's/^\\(GIT_[A-Z_]*\\)=.*/\\1/p'); cd "${w.work}" && git checkout -q main && echo moved >> README && git commit -qam moved && git push -q "${w.remote}" main; exit 1; fi\nexit 0\n`, { mode: 0o755 });
+const hookAlways = (w) => writeFileSync(join(w.remote, 'hooks', 'pre-receive'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+
+test('another kind of refusal: its kind is printed as filtered data, and it is a FAULT (the switch is off)', () => {
+  assert.equal(RETRY_REMOTE_REJECTED_IF_MAIN_MOVED, false);
+  const w = world(); const e = pr(w, add()); hookOnce(w);
+  let text = ''; assert.throws(() => { try { land(w, [e]); } catch (x) { throw x; } }, /refused, not as a fast-forward/);
+  const lines = []; const w2 = world(); const e2 = pr(w2, add()); hookOnce(w2);
+  const dir = mkdtempSync(join(w2.root, 'store-')); const parentsOf = (sha) => g(w2.root, ['--git-dir', w2.remote, 'rev-list', '--parents', '-n', '1', sha]).split(' ').slice(1);
+  assert.throws(() => run({ dir, remote: w2.remote, listJson: JSON.stringify([e2]), parentsOf, log: (s) => lines.push(s), waitMs: () => 0 }));
+  text = lines.join('\n');
+  assert.match(text, /attempt 1: tip [0-9a-f]{10}: refused, another kind\nattempt 1: the refusal's kind \(data, not acted on\): flag refused, summary \[remote rejected\] \(pre-receive hook declined\)/);
+  assert.doesNotMatch(text, /landed #/);
+});
+
+test('the kind filter keeps only plain characters and at most 120 of them', () => {
+  const k = pushKind('!\tx:refs/heads/main\t[remote rejected] (bad <b>`ref`</b> $(rm -rf) ' + 'x'.repeat(200) + ')');
+  assert.ok(k.length <= 120 && /^[A-Za-z0-9 ()[\].,:-]*$/.test(k) && k.startsWith('flag refused, summary [remote rejected] (bad brefb (rm -rf) xxx'), k);
+  assert.equal(pushKind('To x\nDone'), 'no status line for main');
+  assert.equal(remoteRejected('!\tx:refs/heads/main\t[remote rejected] (cannot lock ref)'), true);
+  assert.equal(remoteRejected('!\tx:refs/heads/main\t[rejected] (fetch first)'), false);
+  assert.equal(remoteRejected('remote: [remote rejected] refs/heads/main'), false);
+});
+
+test('switch ON: a remote rejection while main moved is retried and lands; with main still it is a FAULT at once', () => {
+  const w = world(); const e = pr(w, add()); hookOnce(w);
+  const { res, text } = land(w, [e], undefined, { retryRemoteRejected: true });
+  assert.equal(why(res, e.pr), 'landed');
+  assert.match(text, /attempt 1: [\s\S]*\[remote rejected\][\s\S]*attempt 1: main moved since this attempt's tip[\s\S]*attempt 2: tip [0-9a-f]{10}: pushed/);
+  const w2 = world(); const e2 = pr(w2, add()); hookAlways(w2);
+  assert.throws(() => land(w2, [e2], undefined, { retryRemoteRejected: true }), /refused by the remote and main did not move/);
+});
+
+// A remote whose hook moves main and refuses on EVERY push: each refusal is a remote rejection while main moved.
+const hookEvery = (w) => writeFileSync(join(w.remote, 'hooks', 'pre-receive'), `#!/bin/sh\nm="${w.root}/inhook"\nif [ -e "$m" ]; then exit 0; fi\n: > "$m"; unset $(env | sed -n 's/^\\(GIT_[A-Z_]*\\)=.*/\\1/p'); cd "${w.work}" && git checkout -q main && git pull -q --ff-only "${w.remote}" main 2>/dev/null; echo moved >> README && git commit -qam moved && git push -q "${w.remote}" main; rm -f "$m"; exit 1\n`, { mode: 0o755 });
+
+test('switch ON: at most three retries of a remote rejection, then a FAULT; the kind line on EVERY such refusal', () => {
+  assert.equal(MAX_REMOTE_RETRIES, 3);
+  const w = world(); const e = pr(w, add()); hookEvery(w);
+  const lines = []; const dir = mkdtempSync(join(w.root, 'store-')); const parentsOf = (sha) => g(w.root, ['--git-dir', w.remote, 'rev-list', '--parents', '-n', '1', sha]).split(' ').slice(1);
+  assert.throws(() => run({ dir, remote: w.remote, listJson: JSON.stringify([e]), parentsOf, log: (s) => lines.push(s), waitMs: () => 0, retryRemoteRejected: true }), /refused by the remote 4 times while main moved/);
+  const text = lines.join('\n');
+  assert.equal((text.match(/^attempt \d+: tip [0-9a-f]{10}: refused, another kind$/gm) || []).length, 4);
+  assert.equal((text.match(/^attempt \d+: the refusal's kind \(data, not acted on\): flag refused, summary \[remote rejected\]/gm) || []).length, 4);
+  assert.doesNotMatch(text, /landed #/);
+});
+
+test('switch OFF: the kind line is printed on the one such refusal before the FAULT', () => {
+  const w = world(); const e = pr(w, add()); hookEvery(w);
+  const lines = []; const dir = mkdtempSync(join(w.root, 'store-')); const parentsOf = (sha) => g(w.root, ['--git-dir', w.remote, 'rev-list', '--parents', '-n', '1', sha]).split(' ').slice(1);
+  assert.throws(() => run({ dir, remote: w.remote, listJson: JSON.stringify([e]), parentsOf, log: (s) => lines.push(s), waitMs: () => 0 }), /refused, not as a fast-forward/);
+  assert.equal((lines.join('\n').match(/the refusal's kind \(data, not acted on\)/g) || []).length, 1);
+});
+
+test('the status is read from git porcelain only', () => {
+  assert.equal(pushStatus('To x\n=\tabc:refs/heads/main\t[up to date]\nDone'), 'pushed');
+  assert.equal(pushStatus('To x\n \tabc:refs/heads/main\t1111..2222\nDone'), 'pushed');
+  assert.equal(pushStatus('To x\n!\tabc:refs/heads/main\t[rejected] (fetch first)\nDone'), 'fast-forward');
+  assert.equal(pushStatus('To x\n!\tabc:refs/heads/main\t[rejected] (non-fast-forward)\nDone'), 'fast-forward');
+  assert.equal(pushStatus('To x\n!\tabc:refs/heads/main\t[remote rejected] (pre-receive hook declined)\nDone'), 'other');
+  assert.equal(pushStatus('remote: [rejected] (fetch first) refs/heads/main'), 'other');   // server text is never read as status
+  assert.equal(pushStatus(''), 'other');
 });
 
 test('a signature block or an extra header is left out; names from the variable are ours too', () => {
@@ -200,3 +292,24 @@ test('the list itself: shape refused whole', () => {
   assert.throws(() => parseList(JSON.stringify([{ ...ok, login: 'x[bot]' }])), /plain account/);
   assert.throws(() => parseList(JSON.stringify([{ ...ok, step: 'L-meta-9; rm' }])), /step id/);
 });
+
+// RUN AS A SCRIPT, BY REAL PATH (2026-11-26): through a symlink the script runs (here it stops as a FAULT for want of
+// its settings, which shows it ran), and a file of the same name that only imports it is a FAULT, never a silent 0.
+{
+  const { spawnSync } = await import('node:child_process');
+  const { mkdtempSync, symlinkSync, writeFileSync, mkdirSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
+  const LBP = new URL('./land-by-push.mjs', import.meta.url).pathname;
+  const env = { PATH: process.env.PATH, HOME: process.env.HOME };
+  test('land-by-push: called through a symlink it runs (a FAULT without its settings, not a silent 0)', () => {
+    const d = mkdtempSync(join(tmpdir(), 'lbp-link-')); symlinkSync(LBP, join(d, 'l.mjs'));
+    const r = spawnSync(process.execPath, [join(d, 'l.mjs')], { encoding: 'utf8', env });
+    assert.equal(r.status, 3, r.stdout + r.stderr); assert.match(r.stdout, /^FAULT: /); assert.doesNotMatch(r.stdout, /LAND OK/);
+  });
+  test('land-by-push: a file of its name that does not reach main is a FAULT, exit 3', () => {
+    const d = mkdtempSync(join(tmpdir(), 'lbp-skip-')); mkdirSync(join(d, 'w'));
+    writeFileSync(join(d, 'w', 'land-by-push.mjs'), `import ${JSON.stringify(LBP)};\n`);
+    const r = spawnSync(process.execPath, [join(d, 'w', 'land-by-push.mjs')], { encoding: 'utf8', env });
+    assert.equal(r.status, 3); assert.match(r.stdout, /^FAULT: land-by-push was started but did not run/);
+  });
+}

@@ -37,6 +37,10 @@ on:
         description: Leave empty (the checker on two cores, as always). "all" runs a proof or a refutation on every core of the runner; only our own hand dispatches send it (rehearsal of the all-cores change).
         required: false
         type: string
+      open_claims:
+        description: 'For a reduction only, from the intake: a JSON list of the open pull requests of the same step inside the stale window, [{number, createdAt, author, files}], author the intake 12-hex hash of the sender or null, never a login (an empty list is no claims). A reduction run without it is a FAULT.'
+        required: false
+        type: string
 
 # Least privilege: read the code and read the pull request. This run cannot write anything.
 permissions:
@@ -65,8 +69,14 @@ jobs:
       GAP: ${{ inputs.gap }}
       KIND: ${{ inputs.kind }}
       CORES: ${{ inputs.cores }}
+      OPEN_CLAIMS: ${{ inputs.open_claims }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-      GAPS_URL: https://data.pequalnp.com/data/desk/gaps.json
+      # THE STEP'S ROW, by id (25 Nov): the desk answers the guard's input cut to the one gap id, so the size of the
+      # desk's list never bounds a check. The address is the desk Worker's workers.dev name, which belongs to the
+      # Cloudflare account and resolves under workers.dev: a change of pequalnp.com's registrar or DNS cannot move it.
+      # The id is put on only after the first step's pattern held. The hub records a verdict only when its
+      # statement_sha256 is the hash of the statement the hub itself holds for the lemma.
+      ROW_URL: https://pequalnp-desk.pequalnp.workers.dev/desk/row?gap=
       API: https://api.github.com
       W: /opt/pnp
       # THE PINNED ELAN (red team ruling, 2026-11-25): a release version and the sha256 of its
@@ -123,8 +133,31 @@ jobs:
           get "git/trees/$head?recursive=1" "$W/api/tree.json"
           # One place decides: exactly one file, added, under lean/PEqualNP/Outside/, the allowed
           # name (so no path can climb out with ..), a plain file, at most 512 KiB, nothing else.
-          node "$W/base/.github/scripts/outside-guard.mjs" pr "$W/api/pr.json" "$W/api/files.json" "$W/api/tree.json" \
+          # THE GUARD MUST SHOW ITS WORK (2026-11-26): a call passes only on exit 0 AND its fixed last line
+          # "GUARD OK: <mode>"; anything else, silence included, stops the run.
+          guard() { local out; out=$(node "$W/base/.github/scripts/outside-guard.mjs" "$@") || { printf '%s\n' "$out"; exit 1; }
+                    printf '%s\n' "$out"; [ "$(printf '%s\n' "$out" | tail -n 1)" = "GUARD OK: $1" ] || { echo "FAULT: the guard did not say GUARD OK: $1; nothing passed"; exit 1; }; }
+          guard pr "$W/api/pr.json" "$W/api/files.json" "$W/api/tree.json" \
             "$GITHUB_REPOSITORY" "$DEFAULT_BRANCH" "$W/in"
+          # THE NUMBER OF A REDUCTION (outside-guard.mjs checkCutNumber): a reduction's k must be free on the base and in
+          # every EARLIER open pull request of the same step, before the checker spends a minute; the refusal names the
+          # free k. The open pull requests that can claim a k come from the intake, which starts this run and holds the
+          # whole open list with each one's files (the input open_claims, already cut to this step and the stale window).
+          # No list call is made here: the whole-list read it replaces ended every reduction run as a FAULT past 2000
+          # open. FAIL CLOSED: a reduction run without the input, or with one the guard does not accept whole
+          # (outside-guard.mjs checkClaims), is a FAULT, never a pass; an empty list [] means no claims. Only for a
+          # reduction file, so a proof or a refutation reads nothing of it. The input reaches the guard as a file.
+          case "$(cat "$W/in/pr.file")" in lean/PEqualNP/Outside/R_*)
+            [ -n "$OPEN_CLAIMS" ] || { echo "FAULT: a reduction run needs the open claims from the intake (input open_claims) and none came; nothing was judged"; exit 1; }
+            [ "${#OPEN_CLAIMS}" -le 40000 ] || { echo "FAULT: the open claims from the intake are longer than 40000 characters; nothing was judged"; exit 1; }
+            printf '%s' "$OPEN_CLAIMS" > "$W/api/claims.in.json"
+            node "$W/base/.github/scripts/outside-guard.mjs" claims "$(cat "$W/in/pr.file")" "$W/api/claims.in.json" "$W/api/open.json" > "$W/api/claims.out" 2>&1 \
+              && [ "$(tail -n 1 "$W/api/claims.out")" = "GUARD OK: claims" ] \
+              || { sed 's/^REFUSED: /  /' "$W/api/claims.out"; echo "FAULT: the open claims from the intake are malformed; nothing was judged"; exit 1; }
+            cat "$W/api/claims.out"
+            guard number "$(cat "$W/in/pr.file")" "$W/base" "$W/api/open.json" "$PR"
+            ;;
+          esac
           [ ! -e "$W/base/$(cat "$W/in/pr.file")" ] || { echo "REFUSED: the file already exists in the base"; exit 1; }
 
       - name: Download that one file as data
@@ -147,18 +180,23 @@ jobs:
         run: |
           set -eu
           exec > >(tee -a "$RUNNER_TEMP/steps.log") 2>&1   # kept for the verdict step
-          # The statement comes from the desk's public list, never from the pull request.
-          curl -sSf --proto '=https' --max-redirs 0 --max-filesize 20000000 -o "$W/in/gaps.json" "$GAPS_URL"
+          # The statement comes from the desk's row for the gap, never from the pull request (retried: a desk deploy can
+          # answer an error for a few seconds; a row that never arrives ends the run as a FAULT, which says nothing about the proof).
+          curl -sSf --proto '=https' --max-redirs 0 --max-filesize 1000000 --retry 3 --retry-all-errors -o "$W/in/gaps.json" "$ROW_URL$GAP"
           # The run's kind goes to the guard, which refuses it unless the desk's row agrees: check or
           # refute as the desk posts the step; reduce only for an R_<gap>_<n> file of a step posted to be
           # proved whose row carries reductions: true (DARK: absent, every reduction run is refused).
-          node "$W/base/.github/scripts/outside-guard.mjs" gap "$W/in/gaps.json" "$GAP" "$(cat "$W/in/pr.file")" "$W/in" "${KIND:-check}"
+          # THE GUARD MUST SHOW ITS WORK (2026-11-26): a call passes only on exit 0 AND its fixed last line
+          # "GUARD OK: <mode>"; anything else, silence included, stops the run.
+          guard() { local out; out=$(node "$W/base/.github/scripts/outside-guard.mjs" "$@") || { printf '%s\n' "$out"; exit 1; }
+                    printf '%s\n' "$out"; [ "$(printf '%s\n' "$out" | tail -n 1)" = "GUARD OK: $1" ] || { echo "FAULT: the guard did not say GUARD OK: $1; nothing passed"; exit 1; }; }
+          guard gap "$W/in/gaps.json" "$GAP" "$(cat "$W/in/pr.file")" "$W/in" "${KIND:-check}"
           # The kind is the desk's, never the caller's alone: a refutation run is only for a refutation step,
           # and a refutation step is only judged as one; a reduction run only for a step open to reductions.
           [ "$(cat "$W/in/gap.kind")" = "${KIND:-check}" ] || { echo "REFUSED: the run's kind is not the kind the desk posts for this step"; exit 1; }
           # Before anything is built: the file may import Mathlib and the modules the gap lists,
           # and every helper sits inside the file's own namespace (named from its path).
-          node "$W/base/.github/scripts/outside-guard.mjs" imports "$W/in/proof.lean" "$W/in/imports.json" "$(cat "$W/in/pr.file")" "$(cat "$W/in/gap.kind")"
+          guard imports "$W/in/proof.lean" "$W/in/imports.json" "$(cat "$W/in/pr.file")" "$(cat "$W/in/gap.kind")"
           # A listed module may itself be outside-written (under PEqualNP.Outside, merged on the
           # base). Such a module runs code when it compiles, like the judged file, so it is never
           # built before the locked step. This splits what the listed modules import, read as
@@ -166,7 +204,7 @@ jobs:
           # (in/outside-imports.txt, built only by the checker's build in the locked step, as the
           # locked account). It refuses an outside module whose text fails the proof-file rules,
           # and a base module that imports an outside one.
-          node "$W/base/.github/scripts/outside-guard.mjs" closure "$W/base" "$W/in/imports.json" "$(cat "$W/in/pr.file")" "$W/in" "$(cat "$W/in/gap.kind")"
+          guard closure "$W/base" "$W/in/imports.json" "$(cat "$W/in/pr.file")" "$W/in" "$(cat "$W/in/gap.kind")"
 
       - name: Install the pinned Lean toolchain
         run: |
@@ -234,18 +272,41 @@ jobs:
           # load is shared with the files on disk: for a proof that imports all of Mathlib it
           # needs more memory than a standard runner has. Without swap it starves the runner
           # (the run hangs and its log is lost). The swap file belongs to root, mode 0600.
-          # The disk has no room for it until toolsets this run never uses are removed.
-          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
-          # As large as the emptier disk allows while 6 GB of it stay free, at most 12 GB.
+          # As large as the emptier disk allows while 6 GB of it stay free, at most 12 GB, as before. The file was always
+          # allocated without writing (fallocate); what took most of this step's time (88 s at the median, 26 Nov) was
+          # removing toolsets this run never uses, hundreds of thousands of files, to make room. They are removed now ONLY
+          # when the emptier disk lacks room for the full 12 GB plus the 6 GB kept free, or the root disk has under 6 GB
+          # available, so neither the swap nor the workspace has less room than before. The swap is never smaller
+          # than before: either the full 12 GB without removing anything, or exactly today's size after removing them.
+          t0=$(date +%s)
+          pick() { df -m --output=avail,target / /mnt 2>/dev/null | awk 'NR>1' | sort -rn | awk 'NR==1{print $2}'; }
+          avail() { df -m --output=avail "$1" | awk 'NR==2{print $1}'; }
+          d=$(pick); cleared=no
+          # Kept only when the root disk too (the workspace, where the outside file is built) has 6 GB available
+          # (seat-redteam-1, S2): the old step always freed it, whatever disk then took the swap.
+          if [ $(( $(avail "$d") - 6144 )) -lt 12288 ] || [ "$(avail /)" -lt 6144 ]; then
+            sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+            cleared=yes; d=$(pick)
+          fi
           df -m / /mnt 2>/dev/null || true
-          d=$(df -m --output=avail,target / /mnt 2>/dev/null | awk 'NR>1' | sort -rn | awk 'NR==1{print $2}')
-          mb=$(( $(df -m --output=avail "$d" | awk 'NR==2{print $1}') - 6144 ))
+          mb=$(( $(avail "$d") - 6144 ))
           [ "$mb" -le 12288 ] || mb=12288
+          made=none; f=
           if [ "$mb" -ge 1024 ]; then
             f="${d%/}/pnp-swap"
-            sudo fallocate -l "${mb}M" "$f" && sudo chmod 600 "$f"
-            sudo mkswap -q "$f" && sudo swapon "$f"
+            # Allocated without writing; if the filesystem refuses swap on such a file, written as zeros instead.
+            if sudo fallocate -l "${mb}M" "$f" && sudo chmod 600 "$f" && sudo mkswap -q "$f" && sudo swapon "$f"; then made=fallocate
+            else
+              sudo swapoff "$f" 2>/dev/null || true; sudo rm -f "$f"
+              if sudo dd if=/dev/zero of="$f" bs=1M count="$mb" status=none && sudo chmod 600 "$f" && sudo mkswap -q "$f" && sudo swapon "$f"; then made=dd; fi
+            fi
+            [ "$made" != none ] || { echo "FAULT: the swap file could not be turned on (fallocate and dd both failed)"; exit 1; }
           fi
+          # Never without swap (seat-redteam-2, S1): a disk with no room for a swap file of at least 1 GB ends the run as a
+          # FAULT too, instead of going on with none.
+          [ "$made" != none ] || { echo "FAULT: no room for a swap file of at least 1 GB"; exit 1; }
+          echo "swap: ${mb} MB at ${f:-nowhere}, made by ${made}; toolsets removed: ${cleared}; this step took $(( $(date +%s) - t0 )) s"
+          swapon --show
           free -m
 
       - name: Put the file in place and lock the tree
