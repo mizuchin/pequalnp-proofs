@@ -88,3 +88,11 @@
   exact-size の pipeline 統合（分類器は exact を検出済み。mkexact 相当の整形は未実装）、
   提出可能形への importer 適用（promise/exact 系は library import 前提の生成で、
   取り込み器の対象は現状 A 型のみ）。
+
+### 2026-11-27 09:2x JST — 分類器のマスク抽出、desk 形式への対応漏れを修正
+
+- 振り返りで判明: promise-mask 抽出はライブラリ形式 (`M.testBit (m * u + v)`、binder 別々)
+  しか拾えず、実際の desk 形式 (`(359 : ℕ).testBit (4 * u.val + v.val)`、共有 binder
+  `fun u v : Fin 4`) は promise-other に落ちていた。抽出正規表現を拡張し、ascription 形・
+  Nat.testBit 形・u.val 形・共有 binder に対応。5531-low の desk 形が n=4 m=4 M=359 s=5
+  で抽出されることを確認。既存の検証ケース（5531 exact、10055、2229）に退行なし。

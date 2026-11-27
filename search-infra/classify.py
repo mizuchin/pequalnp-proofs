@@ -31,11 +31,15 @@ def classify(stmt: str):
     # promise-mask lower bound: the rep_lower_mask shape
     #   ¬ RepSizeAtMost (fun (u : Fin n) (v : Fin m) => M.testBit (m * u + v)) s
     mask = re.search(r"¬\s*\(?\s*(?:\S+\.)?RepSizeAtMost\s*\(fun\s+(.*?)\s*=>\s*"
-                     r"(\d+)\.testBit\s*\(\s*(\d+)\s*\*\s*\w+\s*\+\s*\w+\s*\)\)\s*(\d+)\s*\)?\s*$", s)
+                     r"(?:\(?\s*(\d+)\s*:\s*ℕ\s*\)?\.testBit|(\d+)\.testBit|Nat\.testBit\s+(\d+))"
+                     r"\s*\(\s*(\d+)\s*\*\s*\w+(?:\.val)?\s*\+\s*\w+(?:\.val)?\s*\)\)\s*(\d+)\s*\)?\s*$", s)
     if mask:
         fins = re.findall(r"Fin\s+(\d+)", mask.group(1))
-        if len(fins) >= 2:
-            n_, m_, M_, s_ = int(fins[0]), int(fins[1]), int(mask.group(2)), int(mask.group(4))
+        if len(fins) >= 1:
+            # shared binder `fun u v : Fin 4` gives one Fin for both sides
+            m_lit = mask.group(2) or mask.group(3) or mask.group(4)
+            n_, m_ = int(fins[0]), int(fins[1]) if len(fins) >= 2 else int(fins[0])
+            M_, s_ = int(m_lit), int(mask.group(6))
             return "B", reasons + [f"subtype=promise-mask n={n_} m={m_} M={M_} s={s_} "
                                    "(mkpromiserow-ready: genpromise + rep_lower_mask)"]
     if re.search(r"¬\s*\(?\s*(?:\S+\.)?RepSizeAtMost\b", s):
