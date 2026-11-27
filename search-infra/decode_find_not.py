@@ -3,7 +3,10 @@
 prune padding/unreachable gates, renumber, verify against the edge
 function on every row (root semantics), print the gate list.
 
-Usage: decode_find_not.py n s EDGES model.out   (EDGES as in genfind_not.py)
+Usage: decode_find_not.py n s EDGES model.out [--bad-rows FILE]
+[--bad-rows FILE] writes every failing row index (one per line) to FILE
+when verification fails; used by cegar_find_not.py to collect
+counterexamples. Without it the behaviour is unchanged.
 """
 import sys
 n, s = int(sys.argv[1]), int(sys.argv[2])
@@ -60,6 +63,9 @@ def evaluate(r):
 bad = [r for r in range(R) if evaluate(r) != g(r)]
 if bad:
     print(f"VERIFY FAILED on {len(bad)} rows, e.g. {bad[:5]}")
+    if '--bad-rows' in sys.argv:
+        with open(sys.argv[sys.argv.index('--bad-rows') + 1], 'w') as f:
+            f.write('\n'.join(map(str, bad)) + '\n')
     sys.exit(1)
 print(f"verified: {len(new_gates)} gates, output wire {new_out}, all {R} rows match")
 for j, (op, ins) in enumerate(new_gates):

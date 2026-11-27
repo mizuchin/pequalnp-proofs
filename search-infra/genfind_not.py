@@ -7,9 +7,13 @@ op value (3 = NOT, reads source 1 only). Padding (op 2) makes the fixed
 s slots mean "at most s". Full 2^n rows (NOT breaks the monotone row
 reduction). Clauses are streamed to the file (the instances are large).
 
-Usage: genfind_not.py n s EDGES out.cnf
+Usage: genfind_not.py n s EDGES out.cnf [--rows FILE|LIST]
 EDGES like 08,010,17 (vertex numbers concatenated, each < 10) or
 u-v pairs separated by commas: 0-8,0-10,1-7.
+--rows restricts the encoded rows: a file with one row index per line
+(commas/whitespace also accepted), or a comma-separated list of row
+indices. Default: all 2^n rows. The variable layout is unchanged, so
+decode_find_not.py still applies. Used by cegar_find_not.py (CEGAR).
 """
 import sys
 n, s = int(sys.argv[1]), int(sys.argv[2])
@@ -23,6 +27,23 @@ for tok in espec.split(','):
         edges.append((int(tok[0]), int(tok[1])))
 R = 1 << n
 A = R + n + s + 1
+# Row subset (CEGAR): default all rows; --rows FILE|LIST restricts the
+# row-dependent clauses (source wiring, gate evaluation, output) to the
+# given rows. Structural clauses are row-independent and unchanged.
+rows = list(range(R))
+i = 5
+while i < len(sys.argv):
+    if sys.argv[i] == '--rows' and i + 1 < len(sys.argv):
+        import os
+        spec = sys.argv[i + 1]
+        txt = open(spec).read() if os.path.isfile(spec) else spec
+        rows = sorted({int(t) for t in txt.replace(',', ' ').split()})
+        bad = [r for r in rows if r < 0 or r >= R]
+        if bad:
+            raise SystemExit(f'row out of range 0..{R - 1}: {bad[:5]}')
+        i += 2
+    else:
+        raise SystemExit(f'unknown argument: {sys.argv[i]}')
 def g(r): return any((r >> u) & 1 and (r >> v) & 1 for u, v in edges)
 def ix(kd, j, a): return (kd * (s + 1) + j) * A + a
 def P(v): return v + 1
@@ -38,7 +59,7 @@ def clauses():
             yield [P(ix(sd, j, k)) for k in range(n + j + 1)]
     for sd in (1, 2):
         for j in range(s):
-            for r in range(R):
+            for r in rows:
                 for k in range(n + j + 1):
                     if k < n:
                         yield [Q(ix(sd, j, k)), L(ix(sd + 3, j, r), bit(r, k))]
@@ -48,7 +69,7 @@ def clauses():
                     else:
                         yield [Q(ix(sd, j, k)), Q(ix(sd + 3, j, r))]
     for j in range(s):
-        for r in range(R):
+        for r in rows:
             o0, o1, o2, o3 = ix(0, j, 0), ix(0, j, 1), ix(0, j, 2), ix(0, j, 3)
             w, u1, u2 = ix(3, j, r), ix(4, j, r), ix(5, j, r)
             yield [Q(o0), Q(w), P(u1)]; yield [Q(o0), Q(w), P(u2)]; yield [Q(o0), P(w), Q(u1), Q(u2)]
@@ -56,7 +77,7 @@ def clauses():
             yield [Q(o2), P(w)]
             yield [Q(o3), Q(w), Q(u1)]; yield [Q(o3), P(w), P(u1)]
     yield [P(ix(6, 0, k)) for k in range(n + s + 1)]
-    for r in range(R):
+    for r in rows:
         gr = g(r)
         for k in range(n + s + 1):
             if k < n:
@@ -99,4 +120,4 @@ with open(out, 'w') as o:
             o.write(chunk)
 import os
 os.remove(tmp)
-print(f'vars={nv} clauses={cnt}', file=sys.stderr)
+print(f'rows={len(rows)} vars={nv} clauses={cnt}', file=sys.stderr)
